@@ -9,24 +9,24 @@ use crate::messages::{Author, Destination, Message, MessageContent};
 
 #[derive(Debug, Clone)]
 pub struct Client {
-    pub(crate) addr: SocketAddr,
     pub(crate) stream: Arc<TcpStream>,
     pub(crate) sender: Sender<Message>,
-}
-
-impl PartialEq for Client {
-    fn eq(&self, other: &Self) -> bool {
-        self.addr == other.addr
-    }
+    addr: SocketAddr,
 }
 
 impl Client {
-    pub fn new(addr: SocketAddr, stream: TcpStream, sender: &Sender<Message>) -> Self {
-        Self {
-            addr,
+    pub fn new(stream: TcpStream, sender: Sender<Message>) -> io::Result<Self> {
+        let addr = stream.peer_addr()?;
+
+        Ok(Self {
             stream: Arc::new(stream),
-            sender: sender.clone(),
-        }
+            sender,
+            addr,
+        })
+    }
+
+    pub fn addr(&self) -> SocketAddr {
+        self.addr
     }
 
     // Send a message from this client
@@ -60,7 +60,7 @@ impl Client {
     pub(crate) fn request_connect(&self) -> io::Result<()> {
         self.send_message(
             Destination::Server,
-            MessageContent::ConnectRequest(self.clone()),
+            MessageContent::ConnectRequest(self.stream.clone()),
         )
     }
 
@@ -83,12 +83,14 @@ impl Client {
                     return self.request_disconnect();
                 }
                 Ok(nbytes) => {
-                    log::debug!("Client {addr} read {nbytes} bytes into buffer");
-                    let bytes = buffer[0..nbytes].to_owned();
-                    if let Err(err) =
-                        self.send_message(Destination::OtherClients, MessageContent::Bytes(bytes))
-                    {
-                        log::error!("Client {addr} could not send message: {err}");
+                    if nbytes > 0 {
+                        log::debug!("Client {addr} read {nbytes} bytes into buffer");
+                        let bytes = buffer[0..nbytes].to_owned();
+                        if let Err(err) = self
+                            .send_message(Destination::OtherClients, MessageContent::Bytes(bytes))
+                        {
+                            log::error!("Client {addr} could not send message: {err}");
+                        }
                     }
                 }
             }

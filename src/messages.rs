@@ -1,6 +1,8 @@
-use std::{net::SocketAddr, time};
-
-use crate::client::Client;
+use std::{
+    net::{SocketAddr, TcpStream},
+    sync::Arc,
+    time,
+};
 
 #[derive(Debug)]
 pub struct Message {
@@ -8,6 +10,13 @@ pub struct Message {
     pub(crate) destination: Destination,
     pub(crate) timestamp: time::SystemTime,
     pub(crate) content: MessageContent,
+}
+
+#[derive(Debug)]
+pub(crate) enum MessageContent {
+    ConnectRequest(Arc<TcpStream>),
+    DisconnetRequest,
+    Bytes(Vec<u8>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,11 +30,4 @@ pub(crate) enum Destination {
     Server,
     OtherClients,
     Client(SocketAddr),
-}
-
-#[derive(Debug)]
-pub(crate) enum MessageContent {
-    ConnectRequest(Client),
-    DisconnetRequest,
-    Bytes(Vec<u8>),
 }

@@ -9,7 +9,6 @@ use chat_app::{client::Client, messages::Message, server::Server};
 
 // TODO: Better async. Look `tokio` lib
 // TODO: Handle errors propeyly. Look `anyhow` lib
-// TODO: Fix vulnerability for `slow loris reader`
 
 const PORT: u16 = 6969;
 
@@ -35,19 +34,14 @@ fn main() -> io::Result<()> {
         match incoming_stream {
             Err(err) => log::error!("Could not handle incoming TCP connection: {err}"),
             Ok(stream) => {
-                // Identify client
-                let client_addr = match stream.peer_addr() {
-                    Err(err) => {
-                        log::error!("Could not retrieve client address: {err}");
-                        continue;
-                    }
-                    Ok(addr) => addr,
-                };
-                log::info!("Incoming connection from {client_addr}");
-
                 // Spawn client thread
-                let client = Client::new(client_addr, stream, &message_sender);
-                thread::spawn(move || client.run());
+                match Client::new(stream, message_sender.clone()) {
+                    Err(err) => log::error!("Unable to create client: {err}"),
+                    Ok(client) => {
+                        log::info!("Incoming connection from {addr}", addr = client.addr());
+                        thread::spawn(move || client.run());
+                    }
+                }
             }
         }
     }
