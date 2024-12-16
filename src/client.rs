@@ -2,16 +2,15 @@ use std::{
     io::{self, Read},
     net::{self, SocketAddr, TcpStream},
     sync::{mpsc::Sender, Arc},
-    time,
 };
 
 use crate::messages::{Author, Destination, Message, MessageContent};
 
 #[derive(Debug, Clone)]
 pub struct Client {
-    pub(crate) stream: Arc<TcpStream>,
-    pub(crate) sender: Sender<Message>,
     addr: SocketAddr,
+    stream: Arc<TcpStream>,
+    sender: Sender<Message>,
 }
 
 impl Client {
@@ -19,9 +18,9 @@ impl Client {
         let addr = stream.peer_addr()?;
 
         Ok(Self {
+            addr,
             stream: Arc::new(stream),
             sender,
-            addr,
         })
     }
 
@@ -36,16 +35,16 @@ impl Client {
         content: MessageContent,
     ) -> io::Result<()> {
         let addr = self.addr;
-        log::debug!("Client {addr} sending messege");
+        log::debug!("Client {addr} sending messege to {destination}");
         let message = Message {
             author: Author::Client(addr),
             destination,
-            timestamp: time::SystemTime::now(),
+            timestamp: chrono::Utc::now(),
             content,
         };
         if let Err(err) = self.sender.send(message) {
             let mut error_message =
-                format!("Client {addr} could not send connection request to server: {err}");
+                format!("Client {addr} could not send message to {destination}: {err}");
             if let Err(err) = self.stream.shutdown(net::Shutdown::Both) {
                 error_message.push_str(&format!("\nFailed to shutdown stream :{err}"));
             }
@@ -86,11 +85,14 @@ impl Client {
                     if nbytes > 0 {
                         log::debug!("Client {addr} read {nbytes} bytes into buffer");
                         let bytes = buffer[0..nbytes].to_owned();
-                        if let Err(err) = self
-                            .send_message(Destination::OtherClients, MessageContent::Bytes(bytes))
+                        if let Err(err) =
+                            self.send_message(Destination::AllClients, MessageContent::Bytes(bytes))
                         {
                             log::error!("Client {addr} could not send message: {err}");
                         }
+                    } else {
+                        log::debug!("Client {addr} reached EOF");
+                        return self.request_disconnect();
                     }
                 }
             }

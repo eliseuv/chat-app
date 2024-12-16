@@ -8,13 +8,12 @@ use std::{
 use chat_app::{client::Client, messages::Message, server::Server};
 
 // TODO: Better async. Look `tokio` lib
-// TODO: Handle errors propeyly. Look `anyhow` lib
+// TODO: Handle errors properly. Look `anyhow` lib
 
 const PORT: u16 = 6969;
 
 fn main() -> io::Result<()> {
     env_logger::init();
-    println!("# Epic Чат server #");
 
     // Bind TCP listener to address
     let server_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), PORT);
@@ -38,7 +37,7 @@ fn main() -> io::Result<()> {
                 match Client::new(stream, message_sender.clone()) {
                     Err(err) => log::error!("Unable to create client: {err}"),
                     Ok(client) => {
-                        log::info!("Incoming connection from {addr}", addr = client.addr());
+                        log::info!("Spawning client {addr}", addr = client.addr());
                         thread::spawn(move || client.run());
                     }
                 }
