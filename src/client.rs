@@ -1,10 +1,20 @@
+use core::str;
 use std::{
-    io::{self, Read},
-    net::{self, SocketAddr, TcpStream},
-    sync::{mpsc::Sender, Arc},
+    io::{Read, Write},
+    net::{SocketAddr, TcpStream},
+    sync::{
+        mpsc::{SendError, Sender},
+        Arc,
+    },
 };
 
-use crate::messages::{Author, Destination, Message, MessageContent};
+use anyhow::{anyhow, Result};
+use log::debug;
+
+use crate::{
+    messages::{Destination, Message, MessageContent},
+    server,
+};
 
 #[derive(Debug, Clone)]
 pub struct Client {
@@ -14,7 +24,7 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new(stream: TcpStream, sender: Sender<Message>) -> io::Result<Self> {
+    pub fn new(stream: TcpStream, sender: Sender<Message>) -> Result<Self> {
         let addr = stream.peer_addr()?;
 
         Ok(Self {
@@ -33,47 +43,60 @@ impl Client {
         &self,
         destination: Destination,
         content: MessageContent,
-    ) -> io::Result<()> {
-        let addr = self.addr;
-        log::debug!("Client {addr} sending messege to {destination}");
+    ) -> Result<(), SendError<Message>> {
         let message = Message {
-            author: Author::Client(addr),
+            author_addr: self.addr,
             destination,
             timestamp: chrono::Utc::now(),
             content,
         };
-        if let Err(err) = self.sender.send(message) {
-            let mut error_message =
-                format!("Client {addr} could not send message to {destination}: {err}");
-            if let Err(err) = self.stream.shutdown(net::Shutdown::Both) {
-                error_message.push_str(&format!("\nFailed to shutdown stream :{err}"));
-            }
-            log::error!("{}", error_message);
-            return Err(io::Error::new(io::ErrorKind::Other, error_message));
-        }
 
-        Ok(())
+        debug!("Client {addr} sending {message}", addr = self.addr);
+        self.sender.send(message)
     }
 
     // Send connection request to server
-    pub(crate) fn request_connect(&self) -> io::Result<()> {
+    fn request_connect(&self) -> Result<()> {
+        let _ = write!(self.stream.as_ref(), "Token: ");
+
+        let mut buffer = [0; 2 * server::TOKEN_LENGTH];
+        let nbytes = self.stream.as_ref().read(&mut buffer)?;
+        if nbytes != buffer.len() {
+            return Err(anyhow!("Invalid token length: {nbytes}"));
+        }
+        let token_str = str::from_utf8(&buffer)?;
+        let token = server::Token::from_str(token_str)?;
+
+        log::debug!(
+            "Client {addr} sending Connect Request to server with token {token}",
+            addr = self.addr,
+        );
         self.send_message(
             Destination::Server,
-            MessageContent::ConnectRequest(self.stream.clone()),
+            MessageContent::ConnectRequest(self.stream.clone(), token),
         )
+        .map_err(|err| anyhow!("Unable to send Connect Request to Server: {err}"))
     }
 
     // Send disconnection request to server
-    pub(crate) fn request_disconnect(&self) -> io::Result<()> {
+    fn request_disconnect(&self) -> Result<()> {
         self.send_message(Destination::Server, MessageContent::DisconnetRequest)
+            .map_err(|err| anyhow!("Unable to send Disconnect Request to Server: {err}"))
     }
 
     // Run client
-    pub fn run(&self) -> io::Result<()> {
+    pub fn run(&self) -> Result<()> {
         let addr = self.addr;
-        log::info!("Spawning client thread for {addr}");
-        self.request_connect()?;
+        log::info!("Spawned thread for Client {addr}");
 
+        // Send Connect Request to Server
+        if let Err(err) = self.request_connect() {
+            log::error!("Client {addr} unable to send Connect Request to Server: {err}");
+            let _ = self.stream.as_ref().shutdown(std::net::Shutdown::Both);
+            return Err(err);
+        }
+
+        // Chat loop
         let mut buffer = vec![0; 64];
         loop {
             match self.stream.as_ref().read(&mut buffer) {

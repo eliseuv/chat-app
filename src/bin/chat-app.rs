@@ -24,8 +24,8 @@ fn main() -> io::Result<()> {
     let (message_sender, message_receiver) = channel::<Message>();
 
     // Launch server
-    let server = Server::new(message_receiver);
-    thread::spawn(move || server.run());
+    let server = Server::new(message_receiver).expect("Unable to create new Server");
+    let _server_handle = thread::spawn(move || server.run());
 
     // Listen to incoming TCP connections
     for incoming_stream in tcp_listener.incoming() {
@@ -37,8 +37,16 @@ fn main() -> io::Result<()> {
                 match Client::new(stream, message_sender.clone()) {
                     Err(err) => log::error!("Unable to create client: {err}"),
                     Ok(client) => {
-                        log::info!("Spawning client {addr}", addr = client.addr());
-                        thread::spawn(move || client.run());
+                        let _client_handle = thread::spawn(move || {
+                            if let Err(err) = client.run() {
+                                log::error!(
+                                    "Error in Client {addr} thread: {err}",
+                                    addr = client.addr()
+                                );
+                                return Err(err);
+                            }
+                            Ok(())
+                        });
                     }
                 }
             }
