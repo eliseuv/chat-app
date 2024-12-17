@@ -8,7 +8,7 @@ use std::{
     },
 };
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use log::debug;
 
 use crate::{
@@ -38,6 +38,12 @@ impl Client {
         self.addr
     }
 
+    pub fn shutdown(&self) -> Result<()> {
+        self.request_disconnect()?;
+        self.stream.as_ref().shutdown(std::net::Shutdown::Both)?;
+        Ok(())
+    }
+
     // Send a message from this client
     pub(crate) fn send_message(
         &self,
@@ -62,7 +68,8 @@ impl Client {
         let mut buffer = [0; 2 * server::TOKEN_LENGTH];
         let nbytes = self.stream.as_ref().read(&mut buffer)?;
         if nbytes != buffer.len() {
-            return Err(anyhow!("Invalid token length: {nbytes}"));
+            let _ = self.stream.as_ref().write("Invalid token!\n".as_bytes())?;
+            bail!("Invalid token length: {nbytes}");
         }
         let token_str = str::from_utf8(&buffer)?;
         let token = server::Token::from_str(token_str)?;
@@ -91,8 +98,7 @@ impl Client {
 
         // Send Connect Request to Server
         if let Err(err) = self.request_connect() {
-            log::error!("Client {addr} unable to send Connect Request to Server: {err}");
-            let _ = self.stream.as_ref().shutdown(std::net::Shutdown::Both);
+            let _ = self.shutdown();
             return Err(err);
         }
 
@@ -101,8 +107,8 @@ impl Client {
         loop {
             match self.stream.as_ref().read(&mut buffer) {
                 Err(err) => {
-                    log::error!("Client {addr} could not read message into buffer: {err}");
-                    return self.request_disconnect();
+                    let _ = self.shutdown();
+                    return Err(err.into());
                 }
                 Ok(nbytes) => {
                     if nbytes > 0 {
@@ -115,7 +121,7 @@ impl Client {
                         }
                     } else {
                         log::debug!("Client {addr} reached EOF");
-                        return self.request_disconnect();
+                        return self.shutdown();
                     }
                 }
             }

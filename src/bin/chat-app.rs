@@ -8,7 +8,7 @@ use std::{
 use chat_app::{client::Client, messages::Message, server::Server};
 
 // TODO: Better async. Look `tokio` lib
-// TODO: Handle errors properly. Look `anyhow` lib
+// TODO: Use `anyhow` lib to better compose errors
 
 const PORT: u16 = 6969;
 

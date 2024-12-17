@@ -7,7 +7,7 @@ use std::{
     sync::{mpsc::Receiver, Arc},
 };
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use getrandom::getrandom;
 
 use crate::messages::{Destination, Message, MessageContent};
@@ -38,7 +38,7 @@ impl Token {
     fn generate() -> Result<Token> {
         let mut buffer = Token::buffer();
         if let Err(err) = getrandom(&mut buffer) {
-            return Err(anyhow!("Unable to generate random token: {err}"));
+            bail!("Unable to generate random token: {err}");
         }
         Ok(Token(buffer))
     }
@@ -120,9 +120,7 @@ impl Server {
 
         // Check if author is the same as client connecting
         if client_addr != author_addr {
-            return Err(anyhow!(
-                "Client {author_addr} requesting connection for different Client {client_addr}",
-            ));
+            bail!("Client {author_addr} requesting connection for different Client {client_addr}",);
         }
 
         // Add client to connected clients list
@@ -201,6 +199,7 @@ impl Server {
                             // Perform first time connection
                             // Check token provided
                             if client_token != self.access_token {
+                                let _ = stream.as_ref().write("Invalid token!\n".as_bytes());
                                 let _ = stream.as_ref().shutdown(net::Shutdown::Both);
                                 continue;
                             }
@@ -295,6 +294,7 @@ impl Server {
                         MessageContent::ConnectRequest(stream, client_token) => {
                             // Check token provided
                             if client_token != self.access_token {
+                                let _ = stream.as_ref().write("Invalid token!\n".as_bytes());
                                 let _ = stream.as_ref().shutdown(net::Shutdown::Both);
                                 continue;
                             }
