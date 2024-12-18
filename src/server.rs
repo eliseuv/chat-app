@@ -48,9 +48,9 @@ impl Token {
 
     pub(crate) fn from_str(s: &str) -> Result<Self> {
         log::debug!("Token string: {s}");
-        let slen = s.len();
-        if slen % (2 * TOKEN_LENGTH) != 0 {
-            Err(anyhow!("Invalid token string length: {slen}"))
+        let str_len = s.len();
+        if str_len != (2 * TOKEN_LENGTH) {
+            Err(anyhow!("Invalid token string length: {str_len}"))
         } else {
             let mut buffer = Token::new_buffer();
             for (b, k) in buffer.iter_mut().zip((0..s.len()).step_by(2)) {
@@ -139,6 +139,7 @@ impl Server {
                 stream
                     .as_ref()
                     .write_all("Token: ".as_bytes())
+                    .and_then(|()| stream.as_ref().flush())
                     .context("Unable to send token challenge")?;
             }
             self.wait_list.insert(addr, stream);
@@ -168,21 +169,13 @@ impl Server {
                 for (peer_addr, peer_stream) in self.conns.iter() {
                     if *peer_addr != message.author_addr {
                         log::debug!("Sending message from {author_addr} to Client {peer_addr}");
-                        match peer_stream.as_ref().write(&bytes) {
-                            Err(err) => log::error!("Unable to broadcast message from {author_addr} to {peer_addr}: {err}"),
-                            Ok(nbytes) => match nbytes.cmp(&bytes.len()) {
-                                std::cmp::Ordering::Less => log::warn!(
-                                    "Message partially sent: {nbytes}/{total} bytes sent",
-                                    total = bytes.len()
-                                ),
-                                std::cmp::Ordering::Equal => {
-                                    log::debug!("Successfully sent entire message")
-                                }
-                                std::cmp::Ordering::Greater => log::error!(
-                                "More bytes sent than in the original message!?: {nbytes}/{total}",
-                                total = bytes.len()
-                            ),
-                            },
+                        if let Err(err) = peer_stream
+                            .as_ref()
+                            .write_all(&bytes)
+                            .and_then(|()| peer_stream.as_ref().write_all(b"\n"))
+                            .and_then(|()| peer_stream.as_ref().flush())
+                        {
+                            log::error!("Unable to broadcast message from {author_addr} to {peer_addr}: {err}");
                         }
                     }
                 }
@@ -208,22 +201,28 @@ impl Server {
                 );
                 // Disconnect banned client if currently connected
                 if let Some(stream) = self.conns.remove(&author_addr) {
-                    let _ = stream.as_ref().write_all(
-                        format!(
-                            "You are currently banned\nRemaining time: {remaining_secs} seconds\n"
-                        )
-                        .as_bytes(),
-                    );
-                    let _ = stream.as_ref().shutdown(net::Shutdown::Both);
-                } else {
-                    // Refuse Connect Request
-                    if let MessageContent::ConnectRequest(stream) = &message.content {
-                        let _ = (*stream).as_ref().write_all(
+                    let _ = stream
+                        .as_ref()
+                        .write_all(
                             format!(
                             "You are currently banned\nRemaining time: {remaining_secs} seconds\n"
                         )
                             .as_bytes(),
-                        );
+                        )
+                        .and_then(|()| stream.as_ref().flush());
+                    let _ = stream.as_ref().shutdown(net::Shutdown::Both);
+                } else {
+                    // Refuse Connect Request
+                    if let MessageContent::ConnectRequest(stream) = &message.content {
+                        let _ = (*stream)
+                            .as_ref()
+                            .write_all(
+                                format!(
+                            "You are currently banned\nRemaining time: {remaining_secs} seconds\n"
+                        )
+                                .as_bytes(),
+                            )
+                            .and_then(|()| stream.as_ref().flush());
                         let _ = (*stream).as_ref().shutdown(net::Shutdown::Both);
                     }
                 }
@@ -250,7 +249,10 @@ impl Server {
             .or_else(|| self.conns.remove(&addr))
         {
             if let Some(text) = text {
-                let _ = stream.as_ref().write_all(text.as_bytes());
+                let _ = stream
+                    .as_ref()
+                    .write_all(text.as_bytes())
+                    .and_then(|()| stream.as_ref().flush());
             }
             let _ = stream.as_ref().shutdown(net::Shutdown::Both);
         }
@@ -275,8 +277,9 @@ impl Server {
     }
 
     fn authenticate_client(&mut self, addr: SocketAddr, bytes: &[u8]) -> Result<()> {
+        let bytes_len = bytes.len();
         if bytes.len() != 2 * TOKEN_LENGTH {
-            bail!("Invalid token length");
+            bail!("Invalid token length: {bytes_len} bytes");
         }
         let token_str = str::from_utf8(bytes)?;
         log::debug!("Attempting validation from Client {addr} with token: {token_str}");
@@ -290,7 +293,10 @@ impl Server {
                         None => bail!("Client {addr} not found in wait list"),
                         Some(stream) => {
                             // Send welcome message
-                            if let Err(err) = stream.as_ref().write_all(WELCOME_MESSAGE.as_bytes())
+                            if let Err(err) = stream
+                                .as_ref()
+                                .write_all(WELCOME_MESSAGE.as_bytes())
+                                .and_then(|()| stream.as_ref().flush())
                             {
                                 bail!("Unable to send welcome message to Client {addr}: {err}");
                             }
@@ -370,17 +376,17 @@ impl Server {
                 }
 
                 MessageContent::Bytes(bytes) => {
+                    // Filter out escape codes
+                    let bytes_safe: Vec<u8> = bytes.into_iter().filter(|c| *c >= 32).collect();
+
                     // Token challenge for unauthenticated clients
                     if client.auth_timestamp.is_none() {
-                        if let Err(err) = self.authenticate_client(client_addr, &bytes) {
+                        if let Err(err) = self.authenticate_client(client_addr, &bytes_safe) {
                             log::error!("Unable to authenticate Client {client_addr}: {err}");
                             self.shutdown_client(client_addr, Some("Invalid token!\n"));
                         }
                         continue;
                     }
-
-                    // Filter out escape codes
-                    let bytes_safe: Vec<u8> = bytes.into_iter().filter(|c| *c >= 32).collect();
 
                     // Verify if message if valid UTF-8
                     let text = match str::from_utf8(&bytes_safe) {
