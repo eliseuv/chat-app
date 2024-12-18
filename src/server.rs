@@ -59,17 +59,6 @@ impl Token {
             Ok(Token(buffer))
         }
     }
-
-    fn validate_bytes(&self, bytes: &[u8]) -> Result<DateTime<Utc>> {
-        if bytes.len() != 2 * TOKEN_LENGTH {
-            bail!("Invalid token length");
-        }
-        if &Token::from_str(str::from_utf8(bytes)?)? == self {
-            Ok(Utc::now())
-        } else {
-            bail!("Invalid token")
-        }
-    }
 }
 
 impl Display for Token {
@@ -82,21 +71,31 @@ impl Display for Token {
 }
 
 #[derive(Debug)]
-struct Client {
-    stream: Option<Arc<TcpStream>>,
+struct ClientInfo {
     auth_timestamp: Option<DateTime<Utc>>,
     last_message_timestamp: DateTime<Utc>,
     strike_count: u32,
 }
 
-impl Client {}
+impl ClientInfo {
+    fn new() -> Self {
+        Self {
+            auth_timestamp: None,
+            last_message_timestamp: Utc::now(),
+            strike_count: 0,
+        }
+    }
+}
 
+// TODO: Use something better than `wait_list`
 #[derive(Debug)]
 pub struct Server {
     receiver: Receiver<Message>,
     access_token: Token,
-    clients: HashMap<SocketAddr, Client>,
     ban_list: HashMap<IpAddr, DateTime<Utc>>,
+    clients: HashMap<SocketAddr, ClientInfo>,
+    conns: HashMap<SocketAddr, Arc<TcpStream>>,
+    wait_list: HashMap<SocketAddr, Arc<TcpStream>>,
 }
 
 impl Server {
@@ -111,8 +110,10 @@ impl Server {
         Ok(Self {
             receiver,
             access_token,
-            clients: HashMap::new(),
             ban_list: HashMap::new(),
+            clients: HashMap::new(),
+            conns: HashMap::new(),
+            wait_list: HashMap::new(),
         })
     }
 
@@ -125,43 +126,37 @@ impl Server {
             bail!("Client {addr} requesting connection for different Client {stream_addr}",);
         }
 
-        // Send welcome message
-        stream
-            .as_ref()
-            .write_all(WELCOME_MESSAGE.as_bytes())
-            .context("Unable to send welcome message")?;
+        // Check if client is already connected
+        if self.conns.contains_key(&addr) {
+            log::warn!("Client {addr} is already connected");
+            return Ok(());
+        }
 
         // Perform connection to Server
         if let Some(client) = self.clients.get_mut(&addr) {
             // Present token challenge
             if client.auth_timestamp.is_none() {
-                let _ = stream.as_ref().write_all("Token: ".as_bytes());
+                stream
+                    .as_ref()
+                    .write_all("Token: ".as_bytes())
+                    .context("Unable to send token challenge")?;
             }
-            // Update state
-            *client = Client {
-                stream: Some(stream),
-                auth_timestamp: client.auth_timestamp,
-                last_message_timestamp: Utc::now(),
-                strike_count: client.strike_count,
-            };
+            self.wait_list.insert(addr, stream);
         }
 
         Ok(())
     }
 
     fn disconnect_client(&mut self, addr: SocketAddr) -> Result<()> {
-        match self.clients.remove(&addr) {
-            None => bail!("Attempting to disconnect Client unknown to Server"),
-            Some(client) => match client.stream {
-                None => bail!("Attempting to disconnect already disconnected client"),
-                Some(stream) => {
-                    stream
-                        .as_ref()
-                        .shutdown(net::Shutdown::Both)
-                        .context("Unable to shutdown stream while disconnecting Client")?;
-                    Ok(())
-                }
-            },
+        match self.conns.remove(&addr) {
+            None => bail!("Attempting to disconnect already disconnected Client {addr}"),
+            Some(stream) => {
+                stream
+                    .as_ref()
+                    .shutdown(net::Shutdown::Both)
+                    .context("Unable to shutdown stream while disconnecting Client {addr}")?;
+                Ok(())
+            }
         }
     }
 
@@ -170,12 +165,12 @@ impl Server {
         let author_addr = message.author_addr;
         match message.content {
             MessageContent::Bytes(bytes) => {
-                for (peer_addr, peer_client) in self.clients.iter() {
-                    if *peer_addr != message.author_addr && peer_client.auth_timestamp.is_some() {
-                        if let Some(stream) = &peer_client.stream {
-                            log::debug!("Sending message from {author_addr} to Client {peer_addr}");
-                            let nbytes = stream.as_ref().write(&bytes)?;
-                            match nbytes.cmp(&bytes.len()) {
+                for (peer_addr, peer_stream) in self.conns.iter() {
+                    if *peer_addr != message.author_addr {
+                        log::debug!("Sending message from {author_addr} to Client {peer_addr}");
+                        match peer_stream.as_ref().write(&bytes) {
+                            Err(err) => log::error!("Unable to broadcast message from {author_addr} to {peer_addr}: {err}"),
+                            Ok(nbytes) => match nbytes.cmp(&bytes.len()) {
                                 std::cmp::Ordering::Less => log::warn!(
                                     "Message partially sent: {nbytes}/{total} bytes sent",
                                     total = bytes.len()
@@ -187,57 +182,57 @@ impl Server {
                                 "More bytes sent than in the original message!?: {nbytes}/{total}",
                                 total = bytes.len()
                             ),
-                            }
+                            },
                         }
                     }
                 }
                 Ok(())
             }
-            _ => Err(anyhow!("Invalid message type for bradcasting")),
+            _ => Err(anyhow!("Invalid message type for broadcasting")),
         }
     }
 
     // Filter messages from banned IPs. Returns is banned boolean.
     fn ban_filter(&mut self, message: &Message) -> bool {
-        let addr = message.author_addr;
-        log::info!("Checking Client {addr} ban status");
-        if let Some(banned_at) = self.ban_list.get(&addr.ip()) {
+        let author_addr = message.author_addr;
+        let author_ip = author_addr.ip();
+        log::debug!("Checking IP {author_ip} ban status");
+        if let Some(banned_at) = self.ban_list.get(&author_ip) {
             // Calculate ban time remaining
             let remaining_secs = (*banned_at + TOTAL_BAN_TIME)
                 .signed_duration_since(Utc::now())
                 .num_seconds();
             if remaining_secs > 0 {
                 log::info!(
-                    "Client {addr} is currently banned. Remaining time: {remaining_secs} seconds"
+                    "IP {author_ip} is currently banned. Remaining time: {remaining_secs} seconds"
                 );
                 // Disconnect banned client if currently connected
-                if let Some(client) = self.clients.remove(&addr) {
-                    if let Some(stream) = client.stream {
-                        let _ = stream.as_ref().write_all(
-                            format!(
-                            "You are currently banned\nRemaining time: {remaining_secs} seconds\n"
-                        )
-                            .as_bytes(),
-                        );
-                        let _ = stream.as_ref().shutdown(net::Shutdown::Both);
-                    }
-                };
-                // Let client know they are banned and time remaining
-                if let MessageContent::ConnectRequest(stream) = &message.content {
-                    let _ = (*stream).as_ref().write_all(
+                if let Some(stream) = self.conns.remove(&author_addr) {
+                    let _ = stream.as_ref().write_all(
                         format!(
                             "You are currently banned\nRemaining time: {remaining_secs} seconds\n"
                         )
                         .as_bytes(),
                     );
-                    let _ = (*stream).as_ref().shutdown(net::Shutdown::Both);
+                    let _ = stream.as_ref().shutdown(net::Shutdown::Both);
+                } else {
+                    // Refuse Connect Request
+                    if let MessageContent::ConnectRequest(stream) = &message.content {
+                        let _ = (*stream).as_ref().write_all(
+                            format!(
+                            "You are currently banned\nRemaining time: {remaining_secs} seconds\n"
+                        )
+                            .as_bytes(),
+                        );
+                        let _ = (*stream).as_ref().shutdown(net::Shutdown::Both);
+                    }
                 }
                 // Client is still banned
                 true
             } else {
                 // Client no longer banned
-                log::debug!("Client {addr} is no longer banned");
-                let _ = self.ban_list.remove(&addr.ip());
+                log::debug!("Client {author_ip} is no longer banned");
+                let _ = self.ban_list.remove(&author_ip);
                 false
             }
         } else {
@@ -246,25 +241,68 @@ impl Server {
         }
     }
 
+    // Shutdown client, optionally sending a final message
+    fn shutdown_client(&mut self, addr: SocketAddr, text: Option<&str>) {
+        log::info!("Shutting down Client {addr}");
+        if let Some(stream) = self
+            .wait_list
+            .remove(&addr)
+            .or_else(|| self.conns.remove(&addr))
+        {
+            if let Some(text) = text {
+                let _ = stream.as_ref().write_all(text.as_bytes());
+            }
+            let _ = stream.as_ref().shutdown(net::Shutdown::Both);
+        }
+    }
+
+    // Ban a given client
     fn ban_client(&mut self, addr: SocketAddr, reason: &str) {
+        let ip = addr.ip();
         log::info!(
-            "Banning Client {addr}. Reason: {reason}. Ban time: {ban_time} seconds",
+            "Banning IP {ip}. Reason: {reason}. Ban time: {ban_time} seconds",
             ban_time = TOTAL_BAN_TIME.num_seconds()
         );
-        self.ban_list.insert(addr.ip(), Utc::now());
+        self.ban_list.insert(ip, Utc::now());
         // Disconnect client
-        if let Some(client) = self.clients.remove(&addr) {
-            if let Some(stream) = client.stream {
-                let _ = stream.as_ref().write_all(
-                    format!(
-                        "You have been banned\nReason: {reason}\nBan time: {ban_time} seconds\n",
-                        ban_time = TOTAL_BAN_TIME.num_seconds()
-                    )
-                    .as_bytes(),
-                );
-                let _ = stream.as_ref().shutdown(net::Shutdown::Both);
-            }
+        self.shutdown_client(
+            addr,
+            Some(&format!(
+                "You have been banned\nReason: {reason}\nBan time: {ban_time} seconds\n",
+                ban_time = TOTAL_BAN_TIME.num_seconds()
+            )),
+        );
+    }
+
+    fn authenticate_client(&mut self, addr: SocketAddr, bytes: &[u8]) -> Result<()> {
+        if bytes.len() != 2 * TOKEN_LENGTH {
+            bail!("Invalid token length");
         }
+        let token_str = str::from_utf8(bytes)?;
+        log::debug!("Attempting validation from Client {addr} with token: {token_str}");
+        if Token::from_str(token_str)? == self.access_token {
+            log::info!("Client {addr} successfully authenticated");
+            match self.clients.get_mut(&addr) {
+                None => bail!("Unable to find Client {addr} information"),
+                Some(client) => {
+                    client.auth_timestamp = Some(Utc::now());
+                    match self.wait_list.remove(&addr) {
+                        None => bail!("Client {addr} not found in wait list"),
+                        Some(stream) => {
+                            // Send welcome message
+                            if let Err(err) = stream.as_ref().write_all(WELCOME_MESSAGE.as_bytes())
+                            {
+                                bail!("Unable to send welcome message to Client {addr}: {err}");
+                            }
+                            self.conns.insert(addr, stream);
+                        }
+                    }
+                }
+            }
+        } else {
+            bail!("Invalid token")
+        }
+        Ok(())
     }
 
     // Run server
@@ -287,19 +325,13 @@ impl Server {
                 continue;
             }
 
+            let client_addr = message.author_addr;
+
             // Get reference to client info
-            let client = insert_or_get_mut(
-                &mut self.clients,
-                message.author_addr,
-                Client {
-                    stream: None,
-                    auth_timestamp: None,
-                    last_message_timestamp: Utc::now(),
-                    strike_count: 0,
-                },
-            );
+            let client = insert_or_get_mut(&mut self.clients, client_addr, ClientInfo::new());
 
             // Message rate limit
+            // FIXME: A new client always gets a strike on first message
             let message_timestamp = Utc::now();
             if message_timestamp.signed_duration_since(client.last_message_timestamp)
                 < MESSAGE_COOLDOWN_TIME
@@ -307,46 +339,49 @@ impl Server {
                 client.strike_count += 1;
                 log::info!(
                     "Client {addr}: Strike {n}/{total}",
-                    addr = message.author_addr,
+                    addr = client_addr,
                     n = client.strike_count,
                     total = MAX_STRIKE_COUNT
                 );
                 if client.strike_count >= MAX_STRIKE_COUNT {
                     client.strike_count = 0;
                     // Ban offending client
-                    self.ban_client(message.author_addr, "Spamming");
+                    self.ban_client(client_addr, "Spamming");
                     continue;
                 }
             } else {
                 client.strike_count = 0;
             }
+            client.last_message_timestamp = message_timestamp;
 
             // Handle message
             match message.content {
                 MessageContent::ConnectRequest(stream) => {
-                    // TODO: Improve connection method
-                    if let Err(err) = self.connect_client(message.author_addr, stream.clone()) {
-                        log::error!(
-                            "Unable to connect Client {addr}: {err}",
-                            addr = message.author_addr
-                        );
+                    if let Err(err) = self.connect_client(client_addr, stream.clone()) {
+                        log::error!("Unable to connect Client {client_addr}: {err}");
                         let _ = stream.shutdown(net::Shutdown::Both);
-                        continue;
                     }
                 }
 
                 MessageContent::DisconnetRequest => {
-                    if let Err(err) = self.disconnect_client(message.author_addr) {
-                        log::error!(
-                            "Unable to disconnect Client {addr}: {err}",
-                            addr = message.author_addr
-                        );
+                    if let Err(err) = self.disconnect_client(client_addr) {
+                        log::error!("Unable to disconnect Client {client_addr}: {err}");
                     }
                 }
 
                 MessageContent::Bytes(bytes) => {
+                    // Token challenge for unauthenticated clients
+                    if client.auth_timestamp.is_none() {
+                        if let Err(err) = self.authenticate_client(client_addr, &bytes) {
+                            log::error!("Unable to authenticate Client {client_addr}: {err}");
+                            self.shutdown_client(client_addr, Some("Invalid token!\n"));
+                        }
+                        continue;
+                    }
+
                     // Filter out escape codes
                     let bytes_safe: Vec<u8> = bytes.into_iter().filter(|c| *c >= 32).collect();
+
                     // Verify if message if valid UTF-8
                     let text = match str::from_utf8(&bytes_safe) {
                         Err(err) => {
@@ -356,26 +391,8 @@ impl Server {
                         Ok(string) => string,
                     };
 
-                    // Token challenge for unauthenticated clients
-                    if client.auth_timestamp.is_none() {
-                        log::debug!(
-                            "Attempting validation from Client {addr} with token: {text}",
-                            addr = message.author_addr,
-                        );
-                        match self.access_token.validate_bytes(&bytes_safe) {
-                            Err(err) => {
-                                log::error!("Unable to validate token: {err}");
-                            }
-                            Ok(auth_timestamp) => {
-                                log::info!("Token successfully authenticated");
-                                client.auth_timestamp = Some(auth_timestamp);
-                            }
-                        }
-                        continue;
-                    }
-
-                    log::debug!(
-                        "Message from Client {addr} to {dest}: {text_clean}",
+                    log::info!(
+                        "Client {addr} -> {dest}: {text_clean}",
                         addr = message.author_addr,
                         dest = message.destination,
                         text_clean = text.trim_end()
@@ -387,7 +404,8 @@ impl Server {
                         timestamp: message.timestamp,
                         content: MessageContent::Bytes(bytes_safe),
                     };
-                    match message_safe.destination {
+
+                    match message.destination {
                         Destination::Server => {
                             todo!("Handle messages sent to Server")
                         }
@@ -397,7 +415,7 @@ impl Server {
                         Destination::AllClients => {
                             // Broadcast message to other clients
                             if let Err(err) = self.broadcast_message(message_safe) {
-                                log::error!("Unable to brodcast message: {err}");
+                                log::error!("Unable to broadcast message: {err}");
                             }
                         }
                     }
