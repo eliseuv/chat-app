@@ -4,28 +4,22 @@ use std::{
     sync::Arc,
 };
 
-use chrono::Utc;
-
-use crate::server::Token;
+use chrono::{DateTime, Utc};
 
 #[derive(Debug)]
 pub struct Message {
     pub(crate) author_addr: SocketAddr,
     pub(crate) destination: Destination,
-    pub(crate) timestamp: chrono::DateTime<Utc>,
+    pub(crate) timestamp: DateTime<Utc>,
     pub(crate) content: MessageContent,
 }
 
 impl Display for Message {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let content = match &self.content {
-            MessageContent::ConnectRequest(_, _) => "Connection Request",
-            MessageContent::DisconnetRequest => "Disconnection Request",
-            MessageContent::Bytes(_) => "Data",
-        };
         write!(
             f,
             "[{content}] {author} -> {dest} at {dt}",
+            content = self.content,
             author = self.author_addr,
             dest = self.destination,
             dt = self
@@ -37,9 +31,20 @@ impl Display for Message {
 
 #[derive(Debug)]
 pub(crate) enum MessageContent {
-    ConnectRequest(Arc<TcpStream>, Token),
+    ConnectRequest(Arc<TcpStream>),
     DisconnetRequest,
     Bytes(Vec<u8>),
+}
+
+impl Display for MessageContent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let content_fmt = match self {
+            MessageContent::ConnectRequest(_) => "Connect Request",
+            MessageContent::DisconnetRequest => "Disconnect Request",
+            MessageContent::Bytes(_) => "Bytes",
+        };
+        write!(f, "{content_fmt}")
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

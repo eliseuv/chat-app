@@ -1,4 +1,8 @@
-use std::fmt::Display;
+use std::{
+    collections::{hash_map, HashMap},
+    fmt::Display,
+    hash::Hash,
+};
 
 const SAFE_MODE: bool = false;
 
@@ -10,5 +14,16 @@ impl<T: Display> Display for Sensitive<T> {
         } else {
             write!(f, "{value}", value = self.0)
         }
+    }
+}
+
+// Get mutable reference to newly inserted value or to existing value in `HashMap`
+pub fn insert_or_get_mut<K, V>(hashmap: &mut HashMap<K, V>, key: K, new_value: V) -> &mut V
+where
+    K: Eq + Hash,
+{
+    match hashmap.entry(key) {
+        hash_map::Entry::Occupied(entry) => entry.into_mut(),
+        hash_map::Entry::Vacant(entry) => entry.insert(new_value),
     }
 }

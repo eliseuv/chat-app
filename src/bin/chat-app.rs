@@ -35,14 +35,11 @@ fn main() -> io::Result<()> {
             Ok(stream) => {
                 // Spawn client thread
                 match Client::new(stream, message_sender.clone()) {
-                    Err(err) => log::error!("Unable to create client: {err}"),
+                    Err(err) => log::error!("Unable to create new Client: {err}"),
                     Ok(client) => {
                         let _client_handle = thread::spawn(move || {
                             if let Err(err) = client.run() {
-                                log::error!(
-                                    "Error in Client {addr} thread: {err}",
-                                    addr = client.addr()
-                                );
+                                log::error!("Error in {client} thread: {err}",);
                                 return Err(err);
                             }
                             Ok(())
