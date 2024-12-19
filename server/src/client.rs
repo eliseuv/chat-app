@@ -90,7 +90,7 @@ impl Client {
         }
 
         // Chat loop
-        let mut buffer = vec![0; 64];
+        let mut buffer = [0; 64];
         loop {
             match self.stream.as_ref().read(&mut buffer) {
                 Err(err) => {
