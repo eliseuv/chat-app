@@ -1,0 +1,11 @@
+[package]
+name = "server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+log = "0.4.22"
+env_logger = "0.11.5"
+chrono = "0.4.39"
+getrandom = "0.2.15"
+anyhow = "1.0.94"
