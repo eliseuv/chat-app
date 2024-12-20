@@ -1,1 +1,0 @@
-/home/evf/Projects/learning/network/chat-app/target/debug/libchat_app.rlib: /home/evf/Projects/learning/network/chat-app/src/client.rs /home/evf/Projects/learning/network/chat-app/src/lib.rs /home/evf/Projects/learning/network/chat-app/src/messages.rs /home/evf/Projects/learning/network/chat-app/src/server.rs /home/evf/Projects/learning/network/chat-app/src/utils.rs

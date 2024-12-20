@@ -23,7 +23,7 @@ use crate::{
 const TOTAL_BAN_TIME: TimeDelta = TimeDelta::seconds(5 * 60);
 const MESSAGE_COOLDOWN_TIME: TimeDelta = TimeDelta::milliseconds(300);
 const MAX_STRIKE_COUNT: u32 = 5;
-const WELCOME_MESSAGE: &str = "# Welcome to the epic Чат server #\n";
+const WELCOME_MESSAGE: &str = "# Welcome to the chat server #\n";
 pub const TOKEN_LENGTH: usize = 8;
 
 // Access token
