@@ -23,7 +23,6 @@ use crate::{
 const TOTAL_BAN_TIME: TimeDelta = TimeDelta::seconds(5 * 60);
 const MESSAGE_COOLDOWN_TIME: TimeDelta = TimeDelta::milliseconds(300);
 const MAX_STRIKE_COUNT: u32 = 5;
-const WELCOME_MESSAGE: &str = "# Welcome to the chat server #\n";
 pub const TOKEN_LENGTH: usize = 8;
 
 // Access token
@@ -72,14 +71,16 @@ impl Display for Token {
 
 #[derive(Debug)]
 struct ClientInfo {
+    id: usize,
     auth_timestamp: Option<DateTime<Utc>>,
     last_message_timestamp: DateTime<Utc>,
     strike_count: u32,
 }
 
 impl ClientInfo {
-    fn new() -> Self {
+    fn new(id: usize) -> Self {
         Self {
+            id,
             auth_timestamp: None,
             last_message_timestamp: Utc::now(),
             strike_count: 0,
@@ -164,6 +165,11 @@ impl Server {
     // Broadcast message to clients
     fn broadcast_message(&self, message: Message) -> Result<()> {
         let author_addr = message.author_addr;
+        let author_id = self
+            .clients
+            .get(&author_addr)
+            .ok_or(anyhow!("Client {author_addr} id not found"))?
+            .id;
         match message.content {
             MessageContent::Bytes(bytes) => {
                 for (peer_addr, peer_stream) in self.conns.iter() {
@@ -171,7 +177,8 @@ impl Server {
                         log::debug!("Sending message from {author_addr} to Client {peer_addr}");
                         if let Err(err) = peer_stream
                             .as_ref()
-                            .write_all(&bytes)
+                            .write_all(format!("user {author_id}: ").as_bytes())
+                            .and_then(|()| peer_stream.as_ref().write_all(&bytes))
                             .and_then(|()| peer_stream.as_ref().write_all(b"\n"))
                             .and_then(|()| peer_stream.as_ref().flush())
                         {
@@ -285,26 +292,26 @@ impl Server {
         log::debug!("Attempting validation from Client {addr} with token: {token_str}");
         if Token::from_str(token_str)? == self.access_token {
             log::info!("Client {addr} successfully authenticated");
-            match self.clients.get_mut(&addr) {
-                None => bail!("Unable to find Client {addr} information"),
-                Some(client) => {
-                    client.auth_timestamp = Some(Utc::now());
-                    match self.wait_list.remove(&addr) {
-                        None => bail!("Client {addr} not found in wait list"),
-                        Some(stream) => {
-                            // Send welcome message
-                            if let Err(err) = stream
-                                .as_ref()
-                                .write_all(WELCOME_MESSAGE.as_bytes())
-                                .and_then(|()| stream.as_ref().flush())
-                            {
-                                bail!("Unable to send welcome message to Client {addr}: {err}");
-                            }
-                            self.conns.insert(addr, stream);
-                        }
-                    }
-                }
-            }
+            let client = self
+                .clients
+                .get_mut(&addr)
+                .ok_or(anyhow!("Unable to find Client {addr} information"))?;
+            client.auth_timestamp = Some(Utc::now());
+            self.wait_list
+                .remove(&addr)
+                .ok_or(anyhow!("Client {addr} not found in wait list"))
+                .and_then(|stream| {
+                    stream
+                        .as_ref()
+                        .write_all(b"# Welcome to the chat server #\nYou are user {id}\n")
+                        .context("Unable to send welcome message to Client {addr}")?;
+                    stream
+                        .as_ref()
+                        .write_all(format!("You are user {id}\n", id = client.id).as_bytes())?;
+                    stream.as_ref().flush()?;
+                    let _ = self.conns.insert(addr, stream);
+                    Ok(())
+                })?;
         } else {
             bail!("Invalid token")
         }
@@ -334,7 +341,14 @@ impl Server {
             let client_addr = message.author_addr;
 
             // Get reference to client info
-            let client = insert_or_get_mut(&mut self.clients, client_addr, ClientInfo::new());
+            let client = {
+                let clients_count = self.clients.len();
+                insert_or_get_mut(
+                    &mut self.clients,
+                    client_addr,
+                    ClientInfo::new(clients_count),
+                )
+            };
 
             // Message rate limit
             // FIXME: A new client always gets a strike on first message

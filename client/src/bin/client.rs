@@ -281,7 +281,7 @@ fn main() -> Result<()> {
 
     let mut args = env::args();
     let _program = args.next().expect("program name");
-    let addr = args.next().expect("server address address");
+    let addr = args.next().expect("server address");
 
     let stream = TcpStream::connect(format!("{addr}:6969"))?;
     stream.set_nonblocking(true)?;
