@@ -303,11 +303,14 @@ impl Server {
                 .and_then(|stream| {
                     stream
                         .as_ref()
-                        .write_all(b"# Welcome to the chat server #\nYou are user {id}\n")
+                        .write_all(
+                            format!(
+                                "# Welcome to the chat server #\nYou are user {id}\n",
+                                id = client.id
+                            )
+                            .as_bytes(),
+                        )
                         .context("Unable to send welcome message to Client {addr}")?;
-                    stream
-                        .as_ref()
-                        .write_all(format!("You are user {id}\n", id = client.id).as_bytes())?;
                     stream.as_ref().flush()?;
                     let _ = self.conns.insert(addr, stream);
                     Ok(())

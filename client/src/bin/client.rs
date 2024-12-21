@@ -5,11 +5,12 @@ use std::{
     net::TcpStream,
     thread,
     time::Duration,
+    usize,
 };
 
 use anyhow::{bail, Context, Result};
 use crossterm::{
-    cursor::MoveTo,
+    cursor::{self, MoveTo},
     event::{self, Event, KeyCode, KeyModifiers},
     style::Print,
     terminal::{self, Clear, ClearType},
@@ -143,7 +144,7 @@ where
         self.output.flush().context("Unable to flush output")
     }
 
-    fn write_on_center(&mut self, text: &str) -> Result<&mut T> {
+    fn queue_write_on_center(&mut self, text: &str) -> Result<&mut T> {
         self.output
             .queue(MoveTo(
                 (self.width - text.len() as u16) / 2,
@@ -153,43 +154,47 @@ where
             .context("Unable to on the center of the screen")
     }
 
-    fn draw_prompt(&mut self) -> Result<&mut T> {
-        let bar = "━".repeat(self.width as usize);
+    fn draw_cover(&mut self) -> Result<()> {
+        self.output.queue(Clear(ClearType::All))?;
+        self.queue_write_on_center("chat app")?;
+        self.output.flush().context("Unable to draw cover")
+    }
+
+    fn queue_draw_prompt(&mut self) -> Result<&mut T> {
         self.output
             .queue(MoveTo(0, self.height - 2))?
-            .queue(Print(bar))?
+            .queue(Print("━".repeat(self.width as usize)))?
             .queue(MoveTo(0, self.height - 1))?
             .queue(Print(" > "))?
             .queue(Print(self.prompt.text()))
             .context("Unable to draw prompt")
     }
 
-    fn draw_cover(&mut self) -> Result<()> {
-        self.output.queue(Clear(ClearType::All))?;
-        self.write_on_center("chat app")?;
-        self.flush()
-    }
-
-    fn draw_chat(&mut self, rect: Rect) -> Result<()> {
-        todo!()
+    fn queue_draw_chat(&mut self, rect: Rect) -> Result<()> {
+        self.chat
+            .iter()
+            .skip(self.chat.len().saturating_sub(rect.h as usize))
+            .enumerate()
+            .try_fold(self.output.queue(cursor::Show)?, |cmd, (row, line)| {
+                cmd.queue(MoveTo(rect.x, rect.y + row as u16))?
+                    .queue(Print(line.get(0..rect.w as usize).unwrap_or(line)))
+            })
+            .map(|_| ())
+            .context("Unable to print chat")
     }
 
     fn draw_main(&mut self) -> Result<()> {
         // Cleanup
         self.output.queue(Clear(ClearType::All))?;
-        // Chat
-        for (row, line) in self
-            .chat
-            .iter()
-            .skip(self.chat.len().saturating_sub(self.height as usize - 2))
-            .enumerate()
-        {
-            self.output
-                .queue(MoveTo(0, row as u16))?
-                .queue(Print(line.get(0..self.width as usize).unwrap_or(line)))?;
-        }
+        // Draw Chat
+        self.queue_draw_chat(Rect {
+            x: 0,
+            y: 0,
+            w: self.width,
+            h: self.height - 2,
+        })?;
         // Prompt
-        self.draw_prompt()?;
+        self.queue_draw_prompt()?;
 
         self.flush()
     }
