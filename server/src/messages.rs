@@ -1,10 +1,12 @@
+//! Remote Messages
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct RemoteMessage {
+pub struct Message {
     author: Author,
-    content: Content,
     timestamp: i64,
+    content: Content,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

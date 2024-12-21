@@ -1,7 +1,8 @@
+//! Server thread
+
 use core::str;
 use std::{
     collections::HashMap,
-    fmt::Display,
     io::Write,
     net::{self, IpAddr, SocketAddr, TcpStream},
     sync::{mpsc::Receiver, Arc},
@@ -9,11 +10,10 @@ use std::{
 
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, TimeDelta, Utc};
-use getrandom::getrandom;
+use log::debug;
 
 use crate::{
-    local_messages::{Destination, LocalMessage, MessageContent},
-    remote_messages::RemoteMessage,
+    server_specs::{BanReason, ClientRequest, LocalMessage, Token},
     utils::insert_or_get_mut,
 };
 
@@ -22,51 +22,6 @@ use crate::{
 
 // Server constants
 const TOTAL_BAN_TIME: TimeDelta = TimeDelta::seconds(5 * 60);
-pub const TOKEN_LENGTH: usize = 8;
-
-// Access token
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Token(pub(crate) [u8; TOKEN_LENGTH]);
-
-impl Token {
-    // New empty buffer to store token
-    pub(crate) const fn new_buffer() -> [u8; TOKEN_LENGTH] {
-        [0; TOKEN_LENGTH]
-    }
-
-    // Generate new random access token
-    fn generate() -> Result<Token> {
-        let mut buffer = Token::new_buffer();
-        if let Err(err) = getrandom(&mut buffer) {
-            Err(anyhow!("Unable to generate random token: {err}"))
-        } else {
-            Ok(Token(buffer))
-        }
-    }
-
-    pub(crate) fn from_str(s: &str) -> Result<Self> {
-        log::debug!("Token string: {s}");
-        let str_len = s.len();
-        if str_len != (2 * TOKEN_LENGTH) {
-            Err(anyhow!("Invalid token string length: {str_len}"))
-        } else {
-            let mut buffer = Token::new_buffer();
-            for (b, k) in buffer.iter_mut().zip((0..s.len()).step_by(2)) {
-                *b = u8::from_str_radix(&s[k..k + 2], 16)?;
-            }
-            Ok(Token(buffer))
-        }
-    }
-}
-
-impl Display for Token {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        for b in self.0.iter() {
-            write!(f, "{b:02X}")?;
-        }
-        Ok(())
-    }
-}
 
 #[derive(Debug)]
 struct ClientInfo {
@@ -145,6 +100,7 @@ impl Server {
     }
 
     fn disconnect_client(&mut self, addr: SocketAddr) -> Result<()> {
+        debug!("Disconneting Client {addr}");
         match self.conns.remove(&addr) {
             None => bail!("Attempting to disconnect already disconnected Client {addr}"),
             Some(stream) => {
@@ -157,43 +113,35 @@ impl Server {
         }
     }
 
-    // Broadcast message to clients
-    fn broadcast_message(&self, message: LocalMessage) -> Result<()> {
-        let author_addr = message.author_addr;
+    // Broadcast message from a client to all other clients
+    fn broadcast_message(&self, author_addr: SocketAddr, text: &str) -> Result<()> {
         let author_id = self
             .clients
             .get(&author_addr)
             .ok_or(anyhow!("Client {author_addr} id not found"))?
             .id;
-        match message.content {
-            MessageContent::Bytes(bytes) => {
-                for (peer_addr, peer_stream) in self.conns.iter() {
-                    if *peer_addr != message.author_addr {
-                        log::debug!("Sending message from {author_addr} to Client {peer_addr}");
-                        if let Err(err) = peer_stream
-                            .as_ref()
-                            .write_all(format!("user {author_id}: ").as_bytes())
-                            .and_then(|()| peer_stream.as_ref().write_all(&bytes))
-                            .and_then(|()| peer_stream.as_ref().write_all(b"\n"))
-                            .and_then(|()| peer_stream.as_ref().flush())
-                        {
-                            log::error!("Unable to broadcast message from {author_addr} to {peer_addr}: {err}");
-                        }
-                    }
+        for (peer_addr, peer_stream) in self.conns.iter() {
+            if *peer_addr != author_addr {
+                log::debug!("Sending message from Client {author_addr} to Client {peer_addr}");
+                if let Err(err) = peer_stream
+                    .as_ref()
+                    .write_all(format!("user {author_id}: ").as_bytes())
+                    .and_then(|()| peer_stream.as_ref().write_all(text.as_bytes()))
+                    .and_then(|()| peer_stream.as_ref().write_all(b"\n"))
+                    .and_then(|()| peer_stream.as_ref().flush())
+                {
+                    log::error!(
+                        "Unable to broadcast message from Client {author_addr} to Client {peer_addr}: {err}"
+                    );
                 }
-                Ok(())
             }
-            _ => Err(anyhow!("Invalid message type for broadcasting")),
         }
-    }
-
-    fn remote_message(&self, local_message: LocalMessage) -> Result<RemoteMessage> {
-        todo!()
+        Ok(())
     }
 
     // Filter messages from banned IPs. Returns is banned boolean.
     fn ban_filter(&mut self, message: &LocalMessage) -> bool {
-        let author_addr = message.author_addr;
+        let author_addr = message.addr;
         let author_ip = author_addr.ip();
         log::debug!("Checking IP {author_ip} ban status");
         if let Some(banned_at) = self.ban_list.get(&author_ip) {
@@ -219,7 +167,7 @@ impl Server {
                     let _ = stream.as_ref().shutdown(net::Shutdown::Both);
                 } else {
                     // Refuse Connect Request
-                    if let MessageContent::ConnectRequest(stream) = &message.content {
+                    if let ClientRequest::ConnectRequest(stream) = &message.request {
                         let _ = (*stream)
                             .as_ref()
                             .write_all(
@@ -265,7 +213,7 @@ impl Server {
     }
 
     // Ban a given client
-    fn ban_client(&mut self, addr: SocketAddr, reason: &str) {
+    fn ban_client(&mut self, addr: SocketAddr, reason: BanReason) {
         let ip = addr.ip();
         log::info!(
             "Banning IP {ip}. Reason: {reason}. Ban time: {ban_time} seconds",
@@ -282,12 +230,8 @@ impl Server {
         );
     }
 
-    fn authenticate_client(&mut self, addr: SocketAddr, bytes: &[u8]) -> Result<()> {
-        let bytes_len = bytes.len();
-        if bytes.len() != 2 * TOKEN_LENGTH {
-            bail!("Invalid token length: {bytes_len} bytes");
-        }
-        let token_str = str::from_utf8(bytes)?;
+    /// Attempts to authenticate a client with the token it provided
+    fn authenticate_client(&mut self, addr: SocketAddr, token_str: &str) -> Result<()> {
         log::debug!("Attempting validation from Client {addr} with token: {token_str}");
         if Token::from_str(token_str)? == self.access_token {
             log::info!("Client {addr} successfully authenticated");
@@ -296,28 +240,26 @@ impl Server {
                 .get_mut(&addr)
                 .ok_or(anyhow!("Unable to find Client {addr} information"))?;
             client.auth_timestamp = Some(Utc::now());
-            self.wait_list
+            let stream = self
+                .wait_list
                 .remove(&addr)
-                .ok_or(anyhow!("Client {addr} not found in wait list"))
-                .and_then(|stream| {
-                    stream
-                        .as_ref()
-                        .write_all(
-                            format!(
-                                "# Welcome to the chat server #\nYou are user {id}\n",
-                                id = client.id
-                            )
-                            .as_bytes(),
-                        )
-                        .context("Unable to send welcome message to Client {addr}")?;
-                    stream.as_ref().flush()?;
-                    let _ = self.conns.insert(addr, stream);
-                    Ok(())
-                })?;
+                .ok_or(anyhow!("Client {addr} not found in wait list"))?;
+            stream
+                .as_ref()
+                .write_all(
+                    format!(
+                        "Welcome to the chat server. You are user {id}\n",
+                        id = client.id
+                    )
+                    .as_bytes(),
+                )
+                .context("Unable to send welcome message to Client {addr}")?;
+            stream.as_ref().flush()?;
+            let _ = self.conns.insert(addr, stream);
+            Ok(())
         } else {
             bail!("Invalid token")
         }
-        Ok(())
     }
 
     // Run server
@@ -340,7 +282,7 @@ impl Server {
                 continue;
             }
 
-            let client_addr = message.author_addr;
+            let client_addr = message.addr;
 
             // Get reference to client info
             let client = {
@@ -353,70 +295,37 @@ impl Server {
             };
 
             // Handle message
-            match message.content {
-                MessageContent::ConnectRequest(stream) => {
+            match message.request {
+                ClientRequest::ConnectRequest(stream) => {
                     if let Err(err) = self.connect_client(client_addr, stream.clone()) {
                         log::error!("Unable to connect Client {client_addr}: {err}");
                         let _ = stream.shutdown(net::Shutdown::Both);
                     }
                 }
 
-                MessageContent::DisconnetRequest => {
+                ClientRequest::DisconnetRequest => {
                     if let Err(err) = self.disconnect_client(client_addr) {
                         log::error!("Unable to disconnect Client {client_addr}: {err}");
                     }
                 }
 
-                MessageContent::BanMe => {
-                    self.ban_client(client_addr, "Spamming");
+                ClientRequest::BanRequest(reason) => {
+                    self.ban_client(client_addr, reason);
                 }
 
-                MessageContent::Bytes(bytes) => {
-                    // Filter out escape codes
-                    let bytes_safe: Vec<u8> = bytes.into_iter().filter(|c| *c >= 32).collect();
-
+                ClientRequest::Broadcast(text) => {
                     // Token challenge for unauthenticated clients
                     if client.auth_timestamp.is_none() {
-                        if let Err(err) = self.authenticate_client(client_addr, &bytes_safe) {
+                        if let Err(err) = self.authenticate_client(client_addr, &text) {
                             log::error!("Unable to authenticate Client {client_addr}: {err}");
                             self.shutdown_client(client_addr, Some("Invalid token!\n"));
                         }
                         continue;
                     }
 
-                    // Verify if message if valid UTF-8
-                    let text = match str::from_utf8(&bytes_safe) {
-                        Err(err) => {
-                            log::error!("Text from message in not valid UTF-8: {err}");
-                            continue;
-                        }
-                        Ok(string) => string,
-                    };
-
-                    log::info!(
-                        "Client {addr} -> {dest}: {text_clean}",
-                        addr = message.author_addr,
-                        dest = message.destination,
-                        text_clean = text.trim_end()
-                    );
-
-                    let message_safe = LocalMessage {
-                        author_addr: message.author_addr,
-                        destination: message.destination,
-                        timestamp: message.timestamp,
-                        content: MessageContent::Bytes(bytes_safe),
-                    };
-
-                    match message.destination {
-                        Destination::Server => {
-                            todo!("Handle messages sent to Server")
-                        }
-                        Destination::AllClients => {
-                            // Broadcast message to other clients
-                            if let Err(err) = self.broadcast_message(message_safe) {
-                                log::error!("Unable to broadcast message: {err}");
-                            }
-                        }
+                    log::info!("Client {client_addr} says: {text}");
+                    if let Err(err) = self.broadcast_message(client_addr, &text) {
+                        log::error!("Unable to broadcast message: {err}");
                     }
                 }
             }

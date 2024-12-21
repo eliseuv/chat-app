@@ -5,7 +5,7 @@ use std::{
     thread,
 };
 
-use server::{client::Client, local_messages::LocalMessage, server::Server};
+use server::{client::Client, server::Server, server_specs::LocalMessage};
 
 // TODO: Better async. Look `tokio` lib
 // TODO: Use `anyhow` lib to better compose errors
@@ -37,12 +37,11 @@ fn main() -> io::Result<()> {
                 match Client::new(stream, message_sender.clone()) {
                     Err(err) => log::error!("Unable to create new Client: {err}"),
                     Ok(mut client) => {
-                        let _client_handle = thread::spawn(move || {
+                        let _ = thread::spawn(move || {
                             if let Err(err) = client.run() {
                                 log::error!("Error in {client} thread: {err}",);
-                                return Err(err);
+                                let _ = client.shutdown();
                             }
-                            Ok(())
                         });
                     }
                 }
