@@ -12,7 +12,8 @@ use chrono::{DateTime, TimeDelta, Utc};
 use getrandom::getrandom;
 
 use crate::{
-    messages::{Destination, Message, MessageContent},
+    local_messages::{Destination, LocalMessage, MessageContent},
+    remote_messages::RemoteMessage,
     utils::insert_or_get_mut,
 };
 
@@ -21,8 +22,6 @@ use crate::{
 
 // Server constants
 const TOTAL_BAN_TIME: TimeDelta = TimeDelta::seconds(5 * 60);
-const MESSAGE_COOLDOWN_TIME: TimeDelta = TimeDelta::milliseconds(300);
-const MAX_STRIKE_COUNT: u32 = 5;
 pub const TOKEN_LENGTH: usize = 8;
 
 // Access token
@@ -73,8 +72,6 @@ impl Display for Token {
 struct ClientInfo {
     id: usize,
     auth_timestamp: Option<DateTime<Utc>>,
-    last_message_timestamp: DateTime<Utc>,
-    strike_count: u32,
 }
 
 impl ClientInfo {
@@ -82,8 +79,6 @@ impl ClientInfo {
         Self {
             id,
             auth_timestamp: None,
-            last_message_timestamp: Utc::now(),
-            strike_count: 0,
         }
     }
 }
@@ -91,7 +86,7 @@ impl ClientInfo {
 // TODO: Use something better than `wait_list`
 #[derive(Debug)]
 pub struct Server {
-    receiver: Receiver<Message>,
+    receiver: Receiver<LocalMessage>,
     access_token: Token,
     ban_list: HashMap<IpAddr, DateTime<Utc>>,
     clients: HashMap<SocketAddr, ClientInfo>,
@@ -101,7 +96,7 @@ pub struct Server {
 
 impl Server {
     // Create new empty server
-    pub fn new(receiver: Receiver<Message>) -> Result<Self> {
+    pub fn new(receiver: Receiver<LocalMessage>) -> Result<Self> {
         log::debug!("Creating new Server");
 
         // Generate access token
@@ -163,7 +158,7 @@ impl Server {
     }
 
     // Broadcast message to clients
-    fn broadcast_message(&self, message: Message) -> Result<()> {
+    fn broadcast_message(&self, message: LocalMessage) -> Result<()> {
         let author_addr = message.author_addr;
         let author_id = self
             .clients
@@ -192,8 +187,12 @@ impl Server {
         }
     }
 
+    fn remote_message(&self, local_message: LocalMessage) -> Result<RemoteMessage> {
+        todo!()
+    }
+
     // Filter messages from banned IPs. Returns is banned boolean.
-    fn ban_filter(&mut self, message: &Message) -> bool {
+    fn ban_filter(&mut self, message: &LocalMessage) -> bool {
         let author_addr = message.author_addr;
         let author_ip = author_addr.ip();
         log::debug!("Checking IP {author_ip} ban status");
@@ -237,7 +236,7 @@ impl Server {
                 true
             } else {
                 // Client no longer banned
-                log::debug!("Client {author_ip} is no longer banned");
+                log::info!("Client {author_ip} has been unbanned");
                 let _ = self.ban_list.remove(&author_ip);
                 false
             }
@@ -353,30 +352,6 @@ impl Server {
                 )
             };
 
-            // Message rate limit
-            // FIXME: A new client always gets a strike on first message
-            let message_timestamp = Utc::now();
-            if message_timestamp.signed_duration_since(client.last_message_timestamp)
-                < MESSAGE_COOLDOWN_TIME
-            {
-                client.strike_count += 1;
-                log::info!(
-                    "Client {addr}: Strike {n}/{total}",
-                    addr = client_addr,
-                    n = client.strike_count,
-                    total = MAX_STRIKE_COUNT
-                );
-                if client.strike_count >= MAX_STRIKE_COUNT {
-                    client.strike_count = 0;
-                    // Ban offending client
-                    self.ban_client(client_addr, "Spamming");
-                    continue;
-                }
-            } else {
-                client.strike_count = 0;
-            }
-            client.last_message_timestamp = message_timestamp;
-
             // Handle message
             match message.content {
                 MessageContent::ConnectRequest(stream) => {
@@ -390,6 +365,10 @@ impl Server {
                     if let Err(err) = self.disconnect_client(client_addr) {
                         log::error!("Unable to disconnect Client {client_addr}: {err}");
                     }
+                }
+
+                MessageContent::BanMe => {
+                    self.ban_client(client_addr, "Spamming");
                 }
 
                 MessageContent::Bytes(bytes) => {
@@ -421,7 +400,7 @@ impl Server {
                         text_clean = text.trim_end()
                     );
 
-                    let message_safe = Message {
+                    let message_safe = LocalMessage {
                         author_addr: message.author_addr,
                         destination: message.destination,
                         timestamp: message.timestamp,
@@ -431,9 +410,6 @@ impl Server {
                     match message.destination {
                         Destination::Server => {
                             todo!("Handle messages sent to Server")
-                        }
-                        Destination::Client(_peer_addr) => {
-                            todo!("Handle private messages")
                         }
                         Destination::AllClients => {
                             // Broadcast message to other clients

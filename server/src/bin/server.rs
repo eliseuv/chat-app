@@ -5,7 +5,7 @@ use std::{
     thread,
 };
 
-use server::{client::Client, messages::Message, server::Server};
+use server::{client::Client, local_messages::LocalMessage, server::Server};
 
 // TODO: Better async. Look `tokio` lib
 // TODO: Use `anyhow` lib to better compose errors
@@ -21,7 +21,7 @@ fn main() -> io::Result<()> {
     log::info!("Listening to address {server_addr}");
 
     // Create main messages channel
-    let (message_sender, message_receiver) = channel::<Message>();
+    let (message_sender, message_receiver) = channel::<LocalMessage>();
 
     // Launch server
     let server = Server::new(message_receiver).expect("Unable to create new Server");
@@ -36,7 +36,7 @@ fn main() -> io::Result<()> {
                 // Spawn client thread
                 match Client::new(stream, message_sender.clone()) {
                     Err(err) => log::error!("Unable to create new Client: {err}"),
-                    Ok(client) => {
+                    Ok(mut client) => {
                         let _client_handle = thread::spawn(move || {
                             if let Err(err) = client.run() {
                                 log::error!("Error in {client} thread: {err}",);

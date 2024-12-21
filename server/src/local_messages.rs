@@ -7,14 +7,14 @@ use std::{
 use chrono::{DateTime, Utc};
 
 #[derive(Debug)]
-pub struct Message {
+pub struct LocalMessage {
     pub(crate) author_addr: SocketAddr,
     pub(crate) destination: Destination,
     pub(crate) timestamp: DateTime<Utc>,
     pub(crate) content: MessageContent,
 }
 
-impl Display for Message {
+impl Display for LocalMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -33,6 +33,7 @@ impl Display for Message {
 pub(crate) enum MessageContent {
     ConnectRequest(Arc<TcpStream>),
     DisconnetRequest,
+    BanMe,
     Bytes(Vec<u8>),
 }
 
@@ -41,6 +42,7 @@ impl Display for MessageContent {
         let content_fmt = match self {
             MessageContent::ConnectRequest(_) => "Connect Request",
             MessageContent::DisconnetRequest => "Disconnect Request",
+            MessageContent::BanMe => "Ban Me",
             MessageContent::Bytes(_) => "Bytes",
         };
         write!(f, "{content_fmt}")
@@ -51,7 +53,6 @@ impl Display for MessageContent {
 pub(crate) enum Destination {
     Server,
     AllClients,
-    Client(SocketAddr),
 }
 
 impl Display for Destination {
@@ -59,7 +60,6 @@ impl Display for Destination {
         match self {
             Destination::Server => write!(f, "Server"),
             Destination::AllClients => write!(f, "All Clients"),
-            Destination::Client(addr) => write!(f, "Client {addr}"),
         }
     }
 }

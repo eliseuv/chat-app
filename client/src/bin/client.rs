@@ -5,7 +5,6 @@ use std::{
     net::TcpStream,
     thread,
     time::Duration,
-    usize,
 };
 
 use anyhow::{bail, Context, Result};
@@ -29,12 +28,6 @@ struct Rect {
     y: u16,
     w: u16,
     h: u16,
-}
-
-#[derive(Debug)]
-enum State {
-    Default,
-    Quit,
 }
 
 #[derive(Debug)]
@@ -97,6 +90,13 @@ impl Prompt {
     }
 }
 
+// Application state
+#[derive(Debug, PartialEq, Eq)]
+enum State {
+    Default,
+    Quit,
+}
+
 #[derive(Debug)]
 struct ClientInterface<T>
 where
@@ -106,10 +106,10 @@ where
     width: u16,
     height: u16,
     prompt: Prompt,
-    quit: bool,
     chat: Vec<String>,
     buffer: [u8; BUFFER_SIZE],
     stream: TcpStream,
+    state: State,
 }
 
 impl<T> ClientInterface<T>
@@ -127,10 +127,10 @@ where
             width,
             height,
             prompt: Prompt::new(width),
-            quit: false,
             chat: Vec::new(),
             buffer: [0; BUFFER_SIZE],
             stream,
+            state: State::Default,
         })
     }
 
@@ -214,7 +214,7 @@ where
             Event::Key(key_event) => match key_event.code {
                 KeyCode::Char(c) => {
                     if c == 'd' && key_event.modifiers.contains(KeyModifiers::CONTROL) {
-                        self.quit = true;
+                        self.state = State::Quit;
                         return Ok(());
                     }
                     if !self.prompt.is_full() {
@@ -247,7 +247,7 @@ where
             let text = str::from_utf8(&self.buffer[0..n])?;
             self.chat.push(text.to_string());
         } else {
-            self.quit = true;
+            self.state = State::Quit;
         }
         Ok(())
     }
@@ -258,7 +258,7 @@ where
         self.draw_cover()?;
 
         // Main loop
-        while !self.quit {
+        while self.state != State::Quit {
             // Poll for new event
             while event::poll(Duration::ZERO)? {
                 if let Err(err) = self.handle_event() {

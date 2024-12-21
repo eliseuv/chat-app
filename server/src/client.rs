@@ -9,15 +9,21 @@ use std::{
 };
 
 use anyhow::{anyhow, Result};
+use chrono::{DateTime, TimeDelta, Utc};
 use log::debug;
 
-use crate::messages::{Destination, Message, MessageContent};
+use crate::local_messages::{Destination, LocalMessage, MessageContent};
+
+const MESSAGE_COOLDOWN_TIME: TimeDelta = TimeDelta::milliseconds(300);
+const MAX_STRIKE_COUNT: u32 = 5;
 
 #[derive(Debug, Clone)]
 pub struct Client {
     addr: SocketAddr,
     stream: Arc<TcpStream>,
-    sender: Sender<Message>,
+    sender: Sender<LocalMessage>,
+    last_message_time: DateTime<Utc>,
+    strike_count: u32,
 }
 
 impl Display for Client {
@@ -27,13 +33,15 @@ impl Display for Client {
 }
 
 impl Client {
-    pub fn new(stream: TcpStream, sender: Sender<Message>) -> Result<Self> {
+    pub fn new(stream: TcpStream, sender: Sender<LocalMessage>) -> Result<Self> {
         let addr = stream.peer_addr()?;
 
         Ok(Self {
             addr,
             stream: Arc::new(stream),
             sender,
+            last_message_time: Utc::now(),
+            strike_count: 0,
         })
     }
 
@@ -46,8 +54,8 @@ impl Client {
         &self,
         destination: Destination,
         content: MessageContent,
-    ) -> Result<(), SendError<Message>> {
-        let message = Message {
+    ) -> Result<(), SendError<LocalMessage>> {
+        let message = LocalMessage {
             author_addr: self.addr,
             destination,
             timestamp: chrono::Utc::now(),
@@ -79,9 +87,35 @@ impl Client {
         Ok(())
     }
 
+    fn rate_limiter(&mut self) {
+        let message_time = Utc::now();
+        if message_time.signed_duration_since(self.last_message_time) < MESSAGE_COOLDOWN_TIME {
+            self.strike_count += 1;
+            log::info!(
+                "Client {addr}: Strike {n}/{total}",
+                addr = self.addr,
+                n = self.strike_count,
+                total = MAX_STRIKE_COUNT
+            );
+            if self.strike_count >= MAX_STRIKE_COUNT {
+                self.strike_count = 0;
+                // Ban offending client
+                self.send_message(Destination::Server, MessageContent::BanMe);
+            }
+        } else {
+            // Reset strikes
+            self.strike_count = 0;
+        }
+        self.last_message_time = message_time;
+    }
+
     // Run client
-    pub fn run(&self) -> Result<()> {
+    pub fn run(&mut self) -> Result<()> {
         log::info!("Spawned thread for {self}");
+
+        // Message rate limit
+        // FIXME: A new client gets a strike on first Connect Request
+        self.rate_limiter();
 
         // Send Connect Request to Server
         if let Err(err) = self.request_connect() {
