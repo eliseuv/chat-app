@@ -5,7 +5,7 @@ use std::{
     thread,
 };
 
-use server::{client::Client, server::Server, server_specs::LocalMessage};
+use server::{client::Client, local::LocalMessage, server::Server};
 
 // TODO: Better async. Look `tokio` lib
 // TODO: Use `anyhow` lib to better compose errors

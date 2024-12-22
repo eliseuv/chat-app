@@ -10,19 +10,12 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, TimeDelta, Utc};
 use log::debug;
 
-use crate::server_specs::{BanReason, ClientRequest, LocalMessage};
+use crate::local::{BanReason, ClientRequest, LocalMessage};
 
 const MESSAGE_COOLDOWN_TIME: TimeDelta = TimeDelta::milliseconds(300);
 const MAX_STRIKE_COUNT: u32 = 5;
 
-fn parse_text(bytes: &[u8]) -> Result<String> {
-    // Filter out escape codes
-    let bytes_safe: Vec<u8> = bytes.iter().copied().filter(|c| *c >= 32).collect();
-    // Read UTF-8
-    let text = str::from_utf8(&bytes_safe).context("Data is not valid UTF-8")?;
-    Ok(text.to_owned())
-}
-
+/// Client state
 #[derive(Debug, Clone)]
 pub struct Client {
     addr: SocketAddr,
@@ -39,6 +32,7 @@ impl Display for Client {
 }
 
 impl Client {
+    /// Construct new Client
     pub fn new(stream: TcpStream, sender: Sender<LocalMessage>) -> Result<Self> {
         let addr = stream
             .peer_addr()
@@ -58,7 +52,7 @@ impl Client {
         self.addr
     }
 
-    /// Limit rate of messages sent from client
+    /// Limit rate of messages sent from Client
     fn rate_limiter(&mut self) -> Result<()> {
         let message_time = Utc::now();
         if message_time.signed_duration_since(self.last_message_time) < MESSAGE_COOLDOWN_TIME {
@@ -70,8 +64,8 @@ impl Client {
             );
             if self.strike_count >= MAX_STRIKE_COUNT {
                 // Ban offending client
-                self.send_request(ClientRequest::BanRequest(BanReason::Spamming))?;
                 self.strike_count = 0;
+                return self.send_request(ClientRequest::BanRequest(BanReason::Spamming));
             }
         } else {
             // Reset strikes
@@ -89,18 +83,17 @@ impl Client {
             .context("Unable to read data from stream")
     }
 
-    /// Send a request to the server
+    /// Send a Request to the Server
     pub(crate) fn send_request(&self, request: ClientRequest) -> Result<()> {
         let message = LocalMessage {
             addr: self.addr,
-            timestamp: chrono::Utc::now(),
             request,
         };
 
         debug!("{self} sending {message}");
         self.sender
             .send(message)
-            .context("{self} unable to send Request {content} to Server")
+            .context("{self} unable to send {message}")
     }
 
     /// Send Connect Request to Server
@@ -115,10 +108,14 @@ impl Client {
             .context("{self} unable to send Disconnect Request to Server")
     }
 
-    /// Attempts to handle incoming data
+    /// Handle incoming data
     fn handle_data(&mut self, bytes: &[u8]) -> Result<()> {
-        let text = parse_text(bytes)?;
-        self.send_request(ClientRequest::Broadcast(text))
+        // Filter out escape codes
+        let bytes_safe: Vec<u8> = bytes.iter().copied().filter(|c| *c >= 32).collect();
+        // Read UTF-8
+        let text = str::from_utf8(&bytes_safe).context("Data is not valid UTF-8")?;
+        // Send Broadcast Request to Server
+        self.send_request(ClientRequest::Broadcast(text.to_owned()))
     }
 
     /// Shutdown client
@@ -142,12 +139,13 @@ impl Client {
         // Chat loop
         let mut buffer = [0; 64];
         loop {
+            // Message rate limit
+            self.rate_limiter()?;
+            // Read from stream
             buffer.fill(0);
             let n = self.read_stream(&mut buffer)?;
             if n > 0 {
                 log::debug!("{self} read {n} bytes into buffer");
-                // Message rate limit
-                self.rate_limiter()?;
                 // Handle data read from stream
                 if let Err(err) = self.handle_data(&buffer) {
                     log::error!("{self} could not handle data: {err}");

@@ -1,4 +1,23 @@
 [workspace]
-
 resolver = "2"
 members = ["server", "client"]
+
+[workspace.package]
+description = "Server and Client for a simple text chat application"
+authors = ["evf (eliseuv816@gmail.com)"]
+
+[workspace.dependencies]
+
+# Logging
+log = "0.4.22"
+env_logger = "0.11.5"
+
+# Error handling
+anyhow = "1.0.94"
+
+# Time
+chrono = "0.4.39"
+
+# Serialization
+serde = { version = "1.0.216", features = ["derive"] }
+ciborium = "0.2.2"

@@ -1,8 +1,7 @@
-//! Server thread
-
 use core::str;
 use std::{
     collections::HashMap,
+    fmt::Display,
     io::Write,
     net::{self, IpAddr, SocketAddr, TcpStream},
     sync::{mpsc::Receiver, Arc},
@@ -10,10 +9,12 @@ use std::{
 
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, TimeDelta, Utc};
+use getrandom::getrandom;
 use log::debug;
 
 use crate::{
-    server_specs::{BanReason, ClientRequest, LocalMessage, Token},
+    local::{BanReason, ClientRequest, LocalMessage},
+    remote,
     utils::insert_or_get_mut,
 };
 
@@ -22,6 +23,63 @@ use crate::{
 
 // Server constants
 const TOTAL_BAN_TIME: TimeDelta = TimeDelta::seconds(5 * 60);
+/// Server access token length in bytes
+pub(crate) const TOKEN_LENGTH: usize = 8;
+
+/// Server Access Token
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Token(pub(crate) [u8; TOKEN_LENGTH]);
+
+impl Token {
+    /// New empty buffer to store access token
+    pub(crate) const fn new_buffer() -> [u8; TOKEN_LENGTH] {
+        [0; TOKEN_LENGTH]
+    }
+
+    /// Generate new random access token
+    pub(crate) fn generate() -> Result<Token> {
+        let mut buffer = Token::new_buffer();
+        getrandom(&mut buffer).map_err(|err| anyhow!("Unable to generate random token: {err}"))?;
+        Ok(Token(buffer))
+    }
+
+    /// Attempts to parse access token from hex representation string
+    pub(crate) fn from_str(s: &str) -> Result<Self> {
+        log::debug!("Token string: {s}");
+
+        if !s.is_ascii() {
+            bail!("Token string must be ASCII")
+        }
+        let str_len = s.len();
+        if str_len != (2 * TOKEN_LENGTH) {
+            bail!("Invalid token string length: {str_len}")
+        }
+
+        // let buffer: Vec<u8> = (0..str_len)
+        //     .step_by(2)
+        //     .map(|k| {
+        //         u8::from_str_radix(&s[k..k + 2], 16)
+        //             .context("Unable to convert string to hex value")
+        //     })
+        //     .collect()?;
+        // Ok(Token(buffer.try_into::()))
+
+        let mut buffer = Token::new_buffer();
+        for (b, k) in buffer.iter_mut().zip((0..s.len()).step_by(2)) {
+            *b = u8::from_str_radix(&s[k..k + 2], 16)?;
+        }
+        Ok(Token(buffer))
+    }
+}
+
+impl Display for Token {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for b in self.0.iter() {
+            write!(f, "{b:02X}")?;
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug)]
 struct ClientInfo {
@@ -113,19 +171,32 @@ impl Server {
         }
     }
 
+    fn get_client_id(&self, addr: SocketAddr) -> Result<usize> {
+        let id = self
+            .clients
+            .get(&addr)
+            .ok_or(anyhow!("Client {addr} id not found"))?
+            .id;
+        Ok(id)
+    }
+
+    fn remote_message(&self, addr: SocketAddr, text: &str) -> Result<remote::Message> {
+        let id = self.get_client_id(addr)?;
+        let author = format!("user {id}");
+        Ok(remote::Message::new(author, text.to_owned()))
+    }
+
     // Broadcast message from a client to all other clients
     fn broadcast_message(&self, author_addr: SocketAddr, text: &str) -> Result<()> {
-        let author_id = self
-            .clients
-            .get(&author_addr)
-            .ok_or(anyhow!("Client {author_addr} id not found"))?
-            .id;
+        let remote_message = self.remote_message(author_addr, text);
+
+        let id = self.get_client_id(author_addr)?;
         for (peer_addr, peer_stream) in self.conns.iter() {
             if *peer_addr != author_addr {
                 log::debug!("Sending message from Client {author_addr} to Client {peer_addr}");
                 if let Err(err) = peer_stream
                     .as_ref()
-                    .write_all(format!("user {author_id}: ").as_bytes())
+                    .write_all(format!("user {id}: ").as_bytes())
                     .and_then(|()| peer_stream.as_ref().write_all(text.as_bytes()))
                     .and_then(|()| peer_stream.as_ref().write_all(b"\n"))
                     .and_then(|()| peer_stream.as_ref().flush())
@@ -224,7 +295,7 @@ impl Server {
         self.shutdown_client(
             addr,
             Some(&format!(
-                "You have been banned\nReason: {reason}\nBan time: {ban_time} seconds\n",
+                "You have been banned. Reason: {reason}. Ban time: {ban_time} seconds\n",
                 ban_time = TOTAL_BAN_TIME.num_seconds()
             )),
         );
@@ -324,6 +395,7 @@ impl Server {
                     }
 
                     log::info!("Client {client_addr} says: {text}");
+
                     if let Err(err) = self.broadcast_message(client_addr, &text) {
                         log::error!("Unable to broadcast message: {err}");
                     }

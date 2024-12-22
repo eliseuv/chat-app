@@ -166,6 +166,7 @@ dependencies = [
  "env_logger",
  "log",
  "serde",
+ "server",
 ]
 
 [[package]]
