@@ -10,7 +10,6 @@ use std::{
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, TimeDelta, Utc};
 use getrandom::getrandom;
-use log::debug;
 
 use crate::{
     local::{BanReason, ClientRequest, LocalMessage},
@@ -108,9 +107,9 @@ pub struct Server {
 }
 
 impl Server {
-    // Create new empty server
+    /// Create new empty Server
     pub fn new(receiver: Receiver<LocalMessage>) -> Result<Self> {
-        log::debug!("Creating new Server");
+        log::trace!("Creating new Server");
 
         // Generate access token
         let access_token = Token::generate()?;
@@ -137,8 +136,7 @@ impl Server {
 
         // Check if client is already connected
         if self.conns.contains_key(&addr) {
-            log::warn!("Client {addr} is already connected");
-            return Ok(());
+            bail!("Client {addr} is already connected");
         }
 
         // Perform connection to Server
@@ -158,7 +156,7 @@ impl Server {
     }
 
     fn disconnect_client(&mut self, addr: SocketAddr) -> Result<()> {
-        debug!("Disconneting Client {addr}");
+        log::info!("Disconneting Client {addr}");
         match self.conns.remove(&addr) {
             None => bail!("Attempting to disconnect already disconnected Client {addr}"),
             Some(stream) => {
@@ -180,16 +178,35 @@ impl Server {
         Ok(id)
     }
 
-    fn remote_message(&self, addr: SocketAddr, text: &str) -> Result<remote::Message> {
-        let id = self.get_client_id(addr)?;
+    fn broadcast(&self, author_addr: SocketAddr, text: &str) -> Result<()> {
+        log::trace!("Broadcasting message from client {author_addr}");
+        let id = self.get_client_id(author_addr)?;
         let author = format!("user {id}");
-        Ok(remote::Message::new(author, text.to_owned()))
+        let message = remote::Message::new(author, text.to_owned());
+        log::debug!("Sending {message:?}");
+        for (peer_addr, peer_stream) in self.conns.iter() {
+            if *peer_addr != author_addr {
+                log::debug!("Sending message from Client {author_addr} to Client {peer_addr}");
+                if let Err(err) = ciborium::into_writer(&message, peer_stream.as_ref())
+                    .context("Unable to serialize message")
+                    .and_then(|()| {
+                        peer_stream
+                            .as_ref()
+                            .flush()
+                            .context("Unable to flush stream")
+                    })
+                {
+                    log::error!(
+                        "Unable to broadcast message from Client {author_addr} to Client {peer_addr}: {err}"
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 
     // Broadcast message from a client to all other clients
     fn broadcast_message(&self, author_addr: SocketAddr, text: &str) -> Result<()> {
-        let remote_message = self.remote_message(author_addr, text);
-
         let id = self.get_client_id(author_addr)?;
         for (peer_addr, peer_stream) in self.conns.iter() {
             if *peer_addr != author_addr {
@@ -210,18 +227,18 @@ impl Server {
         Ok(())
     }
 
-    // Filter messages from banned IPs. Returns is banned boolean.
+    /// Filter messages from banned IPs. Returns is banned boolean.
     fn ban_filter(&mut self, message: &LocalMessage) -> bool {
         let author_addr = message.addr;
         let author_ip = author_addr.ip();
-        log::debug!("Checking IP {author_ip} ban status");
+        log::trace!("Checking IP {author_ip} ban status");
         if let Some(banned_at) = self.ban_list.get(&author_ip) {
             // Calculate ban time remaining
             let remaining_secs = (*banned_at + TOTAL_BAN_TIME)
                 .signed_duration_since(Utc::now())
                 .num_seconds();
             if remaining_secs > 0 {
-                log::info!(
+                log::debug!(
                     "IP {author_ip} is currently banned. Remaining time: {remaining_secs} seconds"
                 );
                 // Disconnect banned client if currently connected
@@ -333,9 +350,9 @@ impl Server {
         }
     }
 
-    // Run server
+    /// Run server
     pub fn run(mut self) -> Result<()> {
-        log::debug!("Launching chat server");
+        log::trace!("Launching chat server");
 
         loop {
             // Try to receive a message
@@ -395,8 +412,7 @@ impl Server {
                     }
 
                     log::info!("Client {client_addr} says: {text}");
-
-                    if let Err(err) = self.broadcast_message(client_addr, &text) {
+                    if let Err(err) = self.broadcast(client_addr, &text) {
                         log::error!("Unable to broadcast message: {err}");
                     }
                 }

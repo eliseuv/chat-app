@@ -4,9 +4,9 @@ use serde::{Deserialize, Serialize};
 /// Message to be sent to remote client
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Message {
-    timestamp: i64,
-    author: String,
-    text: String,
+    pub timestamp: i64,
+    pub author: String,
+    pub text: String,
 }
 
 impl Message {

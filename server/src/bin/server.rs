@@ -1,9 +1,10 @@
 use std::{
-    io::{self},
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener},
     sync::mpsc::channel,
     thread,
 };
+
+use anyhow::{Context, Result};
 
 use server::{client::Client, local::LocalMessage, server::Server};
 
@@ -12,8 +13,13 @@ use server::{client::Client, local::LocalMessage, server::Server};
 
 const PORT: u16 = 6969;
 
-fn main() -> io::Result<()> {
-    env_logger::init();
+fn main() -> Result<()> {
+    simple_logger::SimpleLogger::new()
+        .env()
+        .with_colors(true)
+        .with_local_timestamps()
+        .init()
+        .context("Unable to initialize logger")?;
 
     // Bind TCP listener to address
     let server_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), PORT);

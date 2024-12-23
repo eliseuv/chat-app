@@ -1,0 +1,9 @@
+appenders:
+  client_log:
+    kind: file
+    path: "logs/client.log"
+
+root:
+  level: trace
+  appenders:
+    - client_log

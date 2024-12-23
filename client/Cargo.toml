@@ -11,7 +11,7 @@ server = { path = "../server/" }
 
 # Logging
 log = { workspace = true }
-env_logger = { workspace = true }
+log4rs = "1.3.0"
 
 # Error handling
 anyhow = { workspace = true }

@@ -10,7 +10,6 @@ authors = ["evf (eliseuv816@gmail.com)"]
 
 # Logging
 log = "0.4.22"
-env_logger = "0.11.5"
 
 # Error handling
 anyhow = "1.0.94"

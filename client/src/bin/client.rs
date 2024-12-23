@@ -8,6 +8,7 @@ use std::{
 };
 
 use anyhow::{bail, Context, Result};
+use chrono::{DateTime, Utc};
 use crossterm::{
     cursor::{self, MoveTo},
     event::{self, Event, KeyCode, KeyModifiers},
@@ -17,10 +18,10 @@ use crossterm::{
     QueueableCommand,
 };
 
+use server::{client::BUFFER_SIZE, remote};
+
 // TODO: Wrap lines
 // TODO: Persistent prompt content on resize
-
-const BUFFER_SIZE: usize = 64;
 
 #[derive(Debug)]
 struct Rect {
@@ -242,14 +243,35 @@ where
     }
 
     fn read_stream(&mut self) -> Result<()> {
-        let n = self.stream.read(&mut self.buffer)?;
-        if n > 0 {
-            let text = str::from_utf8(&self.buffer[0..n])?;
-            self.chat.push(text.to_string());
-        } else {
-            self.state = State::Quit;
+        match self.stream.read(&mut self.buffer) {
+            Err(e) => {
+                if e.kind() == io::ErrorKind::WouldBlock {
+                    Ok(())
+                } else {
+                    Err(e)?
+                }
+            }
+            Ok(n) => {
+                if n > 0 {
+                    log::debug!("Successfully read {n} bytes from stream");
+                    let message =
+                        ciborium::from_reader::<remote::Message, _>(self.buffer.as_slice())
+                            .context("Unable to deserialize message")?;
+                    let dt = DateTime::<Utc>::from_timestamp(message.timestamp, 0)
+                        .context("Unable to parse message timestamp")?;
+                    self.chat.push(format!(
+                        "{author} at {time}: {text}",
+                        author = message.author,
+                        time = dt.to_rfc3339(),
+                        text = message.text
+                    ));
+                } else {
+                    log::trace!("Client has reached EOF");
+                    self.state = State::Quit;
+                }
+                Ok(())
+            }
         }
-        Ok(())
     }
 
     fn run(&mut self) -> Result<()> {
@@ -258,31 +280,38 @@ where
         self.draw_cover()?;
 
         // Main loop
-        while self.state != State::Quit {
-            // Poll for new event
-            while event::poll(Duration::ZERO)? {
-                if let Err(err) = self.handle_event() {
-                    log::error!("Error handling event: {err}");
+        loop {
+            match self.state {
+                State::Quit => {
+                    terminal::disable_raw_mode()?;
+                    return Ok(());
+                }
+                State::Default => {
+                    // Poll for new event
+                    while event::poll(Duration::ZERO)? {
+                        if let Err(err) = self.handle_event() {
+                            log::error!("Error handling event: {err}");
+                        }
+                    }
+
+                    // self.read_stream()?;
+                    if let Err(err) = self.read_stream() {
+                        log::error!("Error reading from stream: {err}");
+                    }
+
+                    self.draw_main()?;
+
+                    // 60 FPS
+                    thread::sleep(Duration::from_nanos(1_000_000_000 / 60));
                 }
             }
-
-            if let Err(err) = self.read_stream() {
-                log::error!("Error reading from stream: {err}");
-            }
-
-            self.draw_main()?;
-
-            // 60 FPS
-            thread::sleep(Duration::from_nanos(1_000_000_000 / 60));
         }
-
-        terminal::disable_raw_mode()?;
-        Ok(())
     }
 }
 
 fn main() -> Result<()> {
-    env_logger::init();
+    log4rs::init_file("client-logger.yml", Default::default())
+        .context("Unable to initialize logger")?;
 
     let mut args = env::args();
     let _program = args.next().expect("program name");

@@ -14,6 +14,7 @@ use crate::local::{BanReason, ClientRequest, LocalMessage};
 
 const MESSAGE_COOLDOWN_TIME: TimeDelta = TimeDelta::milliseconds(300);
 const MAX_STRIKE_COUNT: u32 = 5;
+pub const BUFFER_SIZE: usize = 1024;
 
 /// Client state
 #[derive(Debug, Clone)]
@@ -77,6 +78,7 @@ impl Client {
 
     /// Attempts to read data from stream
     fn read_stream(&self, buffer: &mut [u8]) -> Result<usize> {
+        log::trace!("{self} attempting to read from stream");
         self.stream
             .as_ref()
             .read(buffer)
@@ -98,12 +100,14 @@ impl Client {
 
     /// Send Connect Request to Server
     fn request_connect(&self) -> Result<()> {
+        log::trace!("{self} sending Connect Request");
         self.send_request(ClientRequest::ConnectRequest(self.stream.clone()))
             .context("{self} unable to send Connect Request to Server")
     }
 
     /// Send Disconnect Request to Server
     fn request_disconnect(&self) -> Result<()> {
+        log::trace!("{self} sending Disconnect Request");
         self.send_request(ClientRequest::DisconnetRequest)
             .context("{self} unable to send Disconnect Request to Server")
     }
@@ -131,13 +135,13 @@ impl Client {
 
     /// Run client
     pub fn run(&mut self) -> Result<()> {
-        log::info!("Spawned thread for {self}");
+        log::trace!("Spawned thread for {self}");
 
         // Send Connect Request to Server
         self.request_connect()?;
 
         // Chat loop
-        let mut buffer = [0; 64];
+        let mut buffer = [0; BUFFER_SIZE];
         loop {
             // Message rate limit
             self.rate_limiter()?;
