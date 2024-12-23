@@ -1,10 +1,9 @@
 use core::str;
 use std::{
-    env::{self},
-    io::{self, Read, Write},
+    env,
+    io::{self, Write},
     net::TcpStream,
-    thread,
-    time::Duration,
+    thread, time,
 };
 
 use anyhow::{bail, Context, Result};
@@ -252,44 +251,27 @@ where
     }
 
     fn read_stream(&mut self) -> Result<()> {
-        match self.stream.read(&mut self.buffer) {
-            Err(e) => {
-                if e.kind() == io::ErrorKind::WouldBlock {
-                    Ok(())
-                } else {
-                    Err(e)?
-                }
-            }
-            Ok(n) => {
-                if n > 0 {
-                    log::debug!("Successfully read {n} bytes from stream");
-                    let remote_message =
-                        ciborium::from_reader::<remote::Message, _>(self.buffer.as_slice())
-                            .context("Unable to deserialize message")?;
-                    let dt = chrono::Local
-                        .timestamp_opt(remote_message.timestamp, 0)
-                        .single()
-                        .context("Unable to convert timestamp to local timezone")?;
-                    let message = match remote_message.author {
-                        remote::Author::Server => format!(
-                            "[{time}] {text}",
-                            time = dt.format("%d/%m/%Y %H:%M:%S"),
-                            text = remote_message.text
-                        ),
-                        remote::Author::Client(id) => format!(
-                            "[{time}] User {id}: {text}",
-                            time = dt.format("%d/%m/%Y %H:%M:%S"),
-                            text = remote_message.text
-                        ),
-                    };
-                    self.chat.push(message);
-                } else {
-                    log::trace!("Client has reached EOF");
-                    self.state = State::Quit;
-                }
-                Ok(())
-            }
-        }
+        let remote_message: remote::Message =
+            ciborium::from_reader_with_buffer(&self.stream, &mut self.buffer)
+                .context("Unable to read message from stream")?;
+        let dt = chrono::Local
+            .timestamp_opt(remote_message.timestamp, 0)
+            .single()
+            .context("Unable to convert timestamp to local timezone")?;
+        let message = match remote_message.author {
+            remote::Author::Server => format!(
+                "[{time}] {text}",
+                time = dt.format("%d/%m/%Y %H:%M:%S"),
+                text = remote_message.text
+            ),
+            remote::Author::Client(id) => format!(
+                "[{time}] User {id}: {text}",
+                time = dt.format("%d/%m/%Y %H:%M:%S"),
+                text = remote_message.text
+            ),
+        };
+        self.chat.push(message);
+        Ok(())
     }
 
     fn run(&mut self) -> Result<()> {
@@ -306,7 +288,7 @@ where
                 }
                 State::Default => {
                     // Poll for new event
-                    while event::poll(Duration::ZERO)? {
+                    while event::poll(time::Duration::ZERO)? {
                         if let Err(err) = self.handle_event() {
                             log::error!("Error handling event: {err}");
                         }
@@ -319,7 +301,7 @@ where
                     self.draw_main()?;
 
                     // 60 FPS
-                    thread::sleep(Duration::from_nanos(1_000_000_000 / 60));
+                    thread::sleep(time::Duration::from_nanos(1_000_000_000 / 60));
                 }
             }
         }
