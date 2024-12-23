@@ -8,7 +8,7 @@ use std::{
 };
 
 use anyhow::{bail, Context, Result};
-use chrono::{DateTime, Utc};
+use chrono::TimeZone;
 use crossterm::{
     cursor::{self, MoveTo},
     event::{self, Event, KeyCode, KeyModifiers},
@@ -20,8 +20,12 @@ use crossterm::{
 
 use server::{client::BUFFER_SIZE, remote};
 
-// TODO: Wrap lines
-// TODO: Persistent prompt content on resize
+// TODO: Read message struct directly from stream, without buffer
+// TODO: Separate read message from stream and process it
+// TODO: Send serialized message struct to server
+// TODO: Better authentication step
+// TODO: UI: Wrap lines
+// TODO: UI: Persistent prompt content on resize
 
 #[derive(Debug)]
 struct Rect {
@@ -231,7 +235,12 @@ where
                             Err(err) => log::error!("Unable to send data: {err}"),
                             Ok(n) => log::info!("Successfully sent {n} bytes"),
                         }
-                        self.chat.push("you: ".to_string() + self.prompt.text());
+                        let msg = format!(
+                            "[{dt}] You: {text}",
+                            dt = chrono::Local::now().format("%d/%m/%Y %H:%M:%S"),
+                            text = self.prompt.text()
+                        );
+                        self.chat.push(msg);
                         self.prompt.clear();
                     }
                 }
@@ -254,17 +263,26 @@ where
             Ok(n) => {
                 if n > 0 {
                     log::debug!("Successfully read {n} bytes from stream");
-                    let message =
+                    let remote_message =
                         ciborium::from_reader::<remote::Message, _>(self.buffer.as_slice())
                             .context("Unable to deserialize message")?;
-                    let dt = DateTime::<Utc>::from_timestamp(message.timestamp, 0)
-                        .context("Unable to parse message timestamp")?;
-                    self.chat.push(format!(
-                        "{author} at {time}: {text}",
-                        author = message.author,
-                        time = dt.to_rfc3339(),
-                        text = message.text
-                    ));
+                    let dt = chrono::Local
+                        .timestamp_opt(remote_message.timestamp, 0)
+                        .single()
+                        .context("Unable to convert timestamp to local timezone")?;
+                    let message = match remote_message.author {
+                        remote::Author::Server => format!(
+                            "[{time}] {text}",
+                            time = dt.format("%d/%m/%Y %H:%M:%S"),
+                            text = remote_message.text
+                        ),
+                        remote::Author::Client(id) => format!(
+                            "[{time}] User {id}: {text}",
+                            time = dt.format("%d/%m/%Y %H:%M:%S"),
+                            text = remote_message.text
+                        ),
+                    };
+                    self.chat.push(message);
                 } else {
                     log::trace!("Client has reached EOF");
                     self.state = State::Quit;
@@ -294,7 +312,6 @@ where
                         }
                     }
 
-                    // self.read_stream()?;
                     if let Err(err) = self.read_stream() {
                         log::error!("Error reading from stream: {err}");
                     }

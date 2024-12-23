@@ -143,11 +143,14 @@ impl Server {
         if let Some(client) = self.clients.get_mut(&addr) {
             // Present token challenge
             if client.auth_timestamp.is_none() {
-                stream
-                    .as_ref()
-                    .write_all("Token: ".as_bytes())
-                    .and_then(|()| stream.as_ref().flush())
-                    .context("Unable to send token challenge")?;
+                ciborium::into_writer(
+                    &remote::Message::new(
+                        remote::Author::Server,
+                        "Provide the access token please.".to_owned(),
+                    ),
+                    stream.as_ref(),
+                )
+                .context("Unable to send token challenge")?;
             }
             self.wait_list.insert(addr, stream);
         }
@@ -181,7 +184,7 @@ impl Server {
     fn broadcast(&self, author_addr: SocketAddr, text: &str) -> Result<()> {
         log::trace!("Broadcasting message from client {author_addr}");
         let id = self.get_client_id(author_addr)?;
-        let author = format!("user {id}");
+        let author = remote::Author::Client(id);
         let message = remote::Message::new(author, text.to_owned());
         log::debug!("Sending {message:?}");
         for (peer_addr, peer_stream) in self.conns.iter() {
@@ -195,28 +198,6 @@ impl Server {
                             .flush()
                             .context("Unable to flush stream")
                     })
-                {
-                    log::error!(
-                        "Unable to broadcast message from Client {author_addr} to Client {peer_addr}: {err}"
-                    );
-                }
-            }
-        }
-        Ok(())
-    }
-
-    // Broadcast message from a client to all other clients
-    fn broadcast_message(&self, author_addr: SocketAddr, text: &str) -> Result<()> {
-        let id = self.get_client_id(author_addr)?;
-        for (peer_addr, peer_stream) in self.conns.iter() {
-            if *peer_addr != author_addr {
-                log::debug!("Sending message from Client {author_addr} to Client {peer_addr}");
-                if let Err(err) = peer_stream
-                    .as_ref()
-                    .write_all(format!("user {id}: ").as_bytes())
-                    .and_then(|()| peer_stream.as_ref().write_all(text.as_bytes()))
-                    .and_then(|()| peer_stream.as_ref().write_all(b"\n"))
-                    .and_then(|()| peer_stream.as_ref().flush())
                 {
                     log::error!(
                         "Unable to broadcast message from Client {author_addr} to Client {peer_addr}: {err}"
@@ -243,28 +224,28 @@ impl Server {
                 );
                 // Disconnect banned client if currently connected
                 if let Some(stream) = self.conns.remove(&author_addr) {
-                    let _ = stream
-                        .as_ref()
-                        .write_all(
+                    let _ = ciborium::into_writer(
+                        &remote::Message::new(
+                            remote::Author::Server,
                             format!(
                             "You are currently banned\nRemaining time: {remaining_secs} seconds\n"
-                        )
-                            .as_bytes(),
-                        )
-                        .and_then(|()| stream.as_ref().flush());
+                        ),
+                        ),
+                        stream.as_ref(),
+                    );
                     let _ = stream.as_ref().shutdown(net::Shutdown::Both);
                 } else {
                     // Refuse Connect Request
                     if let ClientRequest::ConnectRequest(stream) = &message.request {
-                        let _ = (*stream)
-                            .as_ref()
-                            .write_all(
+                        let _ = ciborium::into_writer(
+                            &remote::Message::new(
+                                remote::Author::Server,
                                 format!(
                             "You are currently banned\nRemaining time: {remaining_secs} seconds\n"
-                        )
-                                .as_bytes(),
-                            )
-                            .and_then(|()| stream.as_ref().flush());
+                        ),
+                            ),
+                            stream.as_ref(),
+                        );
                         let _ = (*stream).as_ref().shutdown(net::Shutdown::Both);
                     }
                 }
@@ -291,10 +272,10 @@ impl Server {
             .or_else(|| self.conns.remove(&addr))
         {
             if let Some(text) = text {
-                let _ = stream
-                    .as_ref()
-                    .write_all(text.as_bytes())
-                    .and_then(|()| stream.as_ref().flush());
+                let _ = ciborium::into_writer(
+                    &remote::Message::new(remote::Author::Server, text.to_owned()),
+                    stream.as_ref(),
+                );
             }
             let _ = stream.as_ref().shutdown(net::Shutdown::Both);
         }
@@ -332,16 +313,17 @@ impl Server {
                 .wait_list
                 .remove(&addr)
                 .ok_or(anyhow!("Client {addr} not found in wait list"))?;
-            stream
-                .as_ref()
-                .write_all(
+            ciborium::into_writer(
+                &remote::Message::new(
+                    remote::Author::Server,
                     format!(
-                        "Welcome to the chat server. You are user {id}\n",
+                        "Welcome to the chat server! You are user {id}.\n",
                         id = client.id
-                    )
-                    .as_bytes(),
-                )
-                .context("Unable to send welcome message to Client {addr}")?;
+                    ),
+                ),
+                stream.as_ref(),
+            )
+            .context("Unable to send welcome message to Client {addr}")?;
             stream.as_ref().flush()?;
             let _ = self.conns.insert(addr, stream);
             Ok(())
@@ -378,7 +360,7 @@ impl Server {
                 insert_or_get_mut(
                     &mut self.clients,
                     client_addr,
-                    ClientInfo::new(clients_count),
+                    ClientInfo::new(clients_count + 1),
                 )
             };
 
