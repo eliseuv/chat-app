@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::{Context, Result};
 
-use server::{client::Client, local::LocalMessage, server::Server};
+use server::{client::Client, client_requests::ClientRequest, server::Server};
 
 // TODO: Better async. Look `tokio` lib
 // TODO: Use `anyhow` lib to better compose errors
@@ -27,10 +27,11 @@ fn main() -> Result<()> {
     log::info!("Listening to address {server_addr}");
 
     // Create main messages channel
-    let (message_sender, message_receiver) = channel::<LocalMessage>();
+    let (message_sender, message_receiver) = channel::<ClientRequest>();
 
     // Launch server
     let server = Server::new(message_receiver).expect("Unable to create new Server");
+    let access_token = server.access_token();
     let _server_handle = thread::spawn(move || server.run());
 
     // Listen to incoming TCP connections
@@ -44,7 +45,7 @@ fn main() -> Result<()> {
                     Err(err) => log::error!("Unable to create new Client: {err}"),
                     Ok(mut client) => {
                         let _ = thread::spawn(move || {
-                            if let Err(err) = client.run() {
+                            if let Err(err) = client.run(access_token) {
                                 log::error!("Error in {client} thread: {err}",);
                                 let _ = client.shutdown();
                             }

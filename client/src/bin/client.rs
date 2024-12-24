@@ -16,8 +16,7 @@ use crossterm::{
     tty::IsTty,
     QueueableCommand,
 };
-
-use server::{client::BUFFER_SIZE, remote};
+use server::remote;
 
 // TODO: Read message struct directly from stream, without buffer
 // TODO: Separate read message from stream and process it
@@ -111,7 +110,7 @@ where
     height: u16,
     prompt: Prompt,
     chat: Vec<String>,
-    buffer: [u8; BUFFER_SIZE],
+    buffer: [u8; remote::BUFFER_SIZE],
     stream: TcpStream,
     state: State,
 }
@@ -132,7 +131,7 @@ where
             height,
             prompt: Prompt::new(width),
             chat: Vec::new(),
-            buffer: [0; BUFFER_SIZE],
+            buffer: [0; remote::BUFFER_SIZE],
             stream,
             state: State::Default,
         })

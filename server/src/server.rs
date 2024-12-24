@@ -2,7 +2,6 @@ use core::str;
 use std::{
     collections::HashMap,
     fmt::Display,
-    io::Write,
     net::{self, IpAddr, SocketAddr, TcpStream},
     sync::{mpsc::Receiver, Arc},
 };
@@ -12,32 +11,28 @@ use chrono::{DateTime, TimeDelta, Utc};
 use getrandom::getrandom;
 
 use crate::{
-    local::{BanReason, ClientRequest, LocalMessage},
-    remote,
-    utils::insert_or_get_mut,
+    client_requests::{BanReason, ClientRequest, Request},
+    remote::{Author, Message},
 };
 
-// TODO: Fix vulnerability to `slow loris reader`
+// TODO: Authentication
 // TODO: Move more load to the client thread
+// TODO: Fix vulnerability to `slow loris reader`
 
-// Server constants
+/// Total a client remains banned
 const TOTAL_BAN_TIME: TimeDelta = TimeDelta::seconds(5 * 60);
+
 /// Server access token length in bytes
-pub(crate) const TOKEN_LENGTH: usize = 8;
+pub const TOKEN_LENGTH: usize = 8;
 
 /// Server Access Token
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Token(pub(crate) [u8; TOKEN_LENGTH]);
+pub struct Token([u8; TOKEN_LENGTH]);
 
 impl Token {
-    /// New empty buffer to store access token
-    pub(crate) const fn new_buffer() -> [u8; TOKEN_LENGTH] {
-        [0; TOKEN_LENGTH]
-    }
-
     /// Generate new random access token
-    pub(crate) fn generate() -> Result<Token> {
-        let mut buffer = Token::new_buffer();
+    fn generate() -> Result<Token> {
+        let mut buffer = [0; TOKEN_LENGTH];
         getrandom(&mut buffer).map_err(|err| anyhow!("Unable to generate random token: {err}"))?;
         Ok(Token(buffer))
     }
@@ -54,16 +49,7 @@ impl Token {
             bail!("Invalid token string length: {str_len}")
         }
 
-        // let buffer: Vec<u8> = (0..str_len)
-        //     .step_by(2)
-        //     .map(|k| {
-        //         u8::from_str_radix(&s[k..k + 2], 16)
-        //             .context("Unable to convert string to hex value")
-        //     })
-        //     .collect()?;
-        // Ok(Token(buffer.try_into::()))
-
-        let mut buffer = Token::new_buffer();
+        let mut buffer = [0; TOKEN_LENGTH];
         for (b, k) in buffer.iter_mut().zip((0..s.len()).step_by(2)) {
             *b = u8::from_str_radix(&s[k..k + 2], 16)?;
         }
@@ -80,35 +66,29 @@ impl Display for Token {
     }
 }
 
+fn write_to(stream: &TcpStream, text: String) -> Result<()> {
+    Message::new(Author::Server, text)
+        .write_to(stream)
+        .context("Unable to write message to client stream")
+}
+
 #[derive(Debug)]
-struct ClientInfo {
+struct Client {
     id: usize,
-    auth_timestamp: Option<DateTime<Utc>>,
+    stream: Arc<TcpStream>,
 }
 
-impl ClientInfo {
-    fn new(id: usize) -> Self {
-        Self {
-            id,
-            auth_timestamp: None,
-        }
-    }
-}
-
-// TODO: Use something better than `wait_list`
 #[derive(Debug)]
 pub struct Server {
-    receiver: Receiver<LocalMessage>,
+    receiver: Receiver<ClientRequest>,
     access_token: Token,
     ban_list: HashMap<IpAddr, DateTime<Utc>>,
-    clients: HashMap<SocketAddr, ClientInfo>,
-    conns: HashMap<SocketAddr, Arc<TcpStream>>,
-    wait_list: HashMap<SocketAddr, Arc<TcpStream>>,
+    clients: HashMap<SocketAddr, Client>,
 }
 
 impl Server {
     /// Create new empty Server
-    pub fn new(receiver: Receiver<LocalMessage>) -> Result<Self> {
+    pub fn new(receiver: Receiver<ClientRequest>) -> Result<Self> {
         log::trace!("Creating new Server");
 
         // Generate access token
@@ -120,50 +100,83 @@ impl Server {
             access_token,
             ban_list: HashMap::new(),
             clients: HashMap::new(),
-            conns: HashMap::new(),
-            wait_list: HashMap::new(),
         })
     }
 
-    fn connect_client(&mut self, addr: SocketAddr, stream: Arc<TcpStream>) -> Result<()> {
-        let stream_addr = stream.as_ref().peer_addr()?;
-        log::debug!("Connecting Client {stream_addr}");
-
-        // Check if author is the same as client connecting
-        if stream_addr != addr {
-            bail!("Client {addr} requesting connection for different Client {stream_addr}",);
-        }
-
-        // Check if client is already connected
-        if self.conns.contains_key(&addr) {
-            bail!("Client {addr} is already connected");
-        }
-
-        // Perform connection to Server
-        if let Some(client) = self.clients.get_mut(&addr) {
-            // Present token challenge
-            if client.auth_timestamp.is_none() {
-                ciborium::into_writer(
-                    &remote::Message::new(
-                        remote::Author::Server,
-                        "Provide the access token please.".to_owned(),
-                    ),
-                    stream.as_ref(),
-                )
-                .context("Unable to send token challenge")?;
-            }
-            self.wait_list.insert(addr, stream);
-        }
-
-        Ok(())
+    pub fn access_token(&self) -> Token {
+        self.access_token
     }
 
+    /// Filter messages from banned IPs. Returns is banned boolean.
+    fn ban_filter(&mut self, request: &ClientRequest) -> bool {
+        let addr = request.addr;
+        let ip_addr = addr.ip();
+        log::trace!("Checking IP {ip_addr} ban status");
+        if let Some(banned_at) = self.ban_list.get(&ip_addr) {
+            // Calculate ban time remaining
+            let remaining_secs = (*banned_at + TOTAL_BAN_TIME)
+                .signed_duration_since(Utc::now())
+                .num_seconds();
+            if remaining_secs > 0 {
+                log::debug!(
+                    "IP {ip_addr} is currently banned. Remaining time: {remaining_secs} seconds"
+                );
+                // Disconnect banned client if currently connected
+                if let Some(client) = self.clients.remove(&addr) {
+                    let _ = write_to(
+                        client.stream.as_ref(),
+                        format!(
+                            "You are currently banned\nRemaining time: {remaining_secs} seconds\n"
+                        ),
+                    );
+                } else {
+                    // Refuse Connect Request
+                    if let Request::Connect(stream) = &request.request {
+                        let _ = write_to(
+                            stream.as_ref(),
+                            format!(
+                            "You are currently banned\nRemaining time: {remaining_secs} seconds\n"
+                        ),
+                        );
+                        let _ = (*stream).as_ref().shutdown(net::Shutdown::Both);
+                    }
+                }
+                // Client is still banned
+                true
+            } else {
+                // Client no longer banned
+                log::info!("Client {ip_addr} has been unbanned");
+                let _ = self.ban_list.remove(&ip_addr);
+                false
+            }
+        } else {
+            // Client was not banned
+            false
+        }
+    }
+
+    /// Connect client to server
+    fn connect_client(&mut self, addr: SocketAddr, stream: Arc<TcpStream>) -> Result<()>{
+        let id = self.clients.len() + 1;
+
+        if let Some(prev_client) = self.clients.insert(addr, Client{ id, stream }){
+            self.clients.insert(addr, prev_client);
+            bail!("Client {addr} already connected");
+        }
+
+
+        Ok(())
+
+    }
+
+    /// Disconnect client from server
     fn disconnect_client(&mut self, addr: SocketAddr) -> Result<()> {
         log::info!("Disconneting Client {addr}");
-        match self.conns.remove(&addr) {
+        match self.clients.remove(&addr) {
             None => bail!("Attempting to disconnect already disconnected Client {addr}"),
-            Some(stream) => {
-                stream
+            Some(client) => {
+                client
+                    .stream
                     .as_ref()
                     .shutdown(net::Shutdown::Both)
                     .context("Unable to shutdown stream while disconnecting Client {addr}")?;
@@ -181,103 +194,37 @@ impl Server {
         Ok(id)
     }
 
+    fn send_to_client(&self, client: &Client, message: &Message) ->Result<()> {
+        ciborium::into_writer(message, client.stream.as_ref()).context("Unable to send message")
+    }
+
     fn broadcast(&self, author_addr: SocketAddr, text: &str) -> Result<()> {
         log::trace!("Broadcasting message from client {author_addr}");
         let id = self.get_client_id(author_addr)?;
-        let author = remote::Author::Client(id);
-        let message = remote::Message::new(author, text.to_owned());
-        log::debug!("Sending {message:?}");
-        for (peer_addr, peer_stream) in self.conns.iter() {
-            if *peer_addr != author_addr {
+        let author = Author::Client(id);
+        let message = Message::new(author, text.to_owned());
+        log::debug!("Message: {message:?}");
+        self.clients.iter().filter(|(peer_addr, _)| **peer_addr != author_addr ).for_each(|(peer_addr, peer_client)| 
+            {
                 log::debug!("Sending message from Client {author_addr} to Client {peer_addr}");
-                if let Err(err) = ciborium::into_writer(&message, peer_stream.as_ref())
-                    .context("Unable to serialize message")
-                    .and_then(|()| {
-                        peer_stream
-                            .as_ref()
-                            .flush()
-                            .context("Unable to flush stream")
-                    })
-                {
+                if let Err(err) = self.send_to_client(peer_client, &message) {
                     log::error!(
                         "Unable to broadcast message from Client {author_addr} to Client {peer_addr}: {err}"
                     );
                 }
-            }
-        }
-        Ok(())
-    }
 
-    /// Filter messages from banned IPs. Returns is banned boolean.
-    fn ban_filter(&mut self, message: &LocalMessage) -> bool {
-        let author_addr = message.addr;
-        let author_ip = author_addr.ip();
-        log::trace!("Checking IP {author_ip} ban status");
-        if let Some(banned_at) = self.ban_list.get(&author_ip) {
-            // Calculate ban time remaining
-            let remaining_secs = (*banned_at + TOTAL_BAN_TIME)
-                .signed_duration_since(Utc::now())
-                .num_seconds();
-            if remaining_secs > 0 {
-                log::debug!(
-                    "IP {author_ip} is currently banned. Remaining time: {remaining_secs} seconds"
-                );
-                // Disconnect banned client if currently connected
-                if let Some(stream) = self.conns.remove(&author_addr) {
-                    let _ = ciborium::into_writer(
-                        &remote::Message::new(
-                            remote::Author::Server,
-                            format!(
-                            "You are currently banned\nRemaining time: {remaining_secs} seconds\n"
-                        ),
-                        ),
-                        stream.as_ref(),
-                    );
-                    let _ = stream.as_ref().shutdown(net::Shutdown::Both);
-                } else {
-                    // Refuse Connect Request
-                    if let ClientRequest::ConnectRequest(stream) = &message.request {
-                        let _ = ciborium::into_writer(
-                            &remote::Message::new(
-                                remote::Author::Server,
-                                format!(
-                            "You are currently banned\nRemaining time: {remaining_secs} seconds\n"
-                        ),
-                            ),
-                            stream.as_ref(),
-                        );
-                        let _ = (*stream).as_ref().shutdown(net::Shutdown::Both);
-                    }
-                }
-                // Client is still banned
-                true
-            } else {
-                // Client no longer banned
-                log::info!("Client {author_ip} has been unbanned");
-                let _ = self.ban_list.remove(&author_ip);
-                false
-            }
-        } else {
-            // Client was not banned
-            false
-        }
+            });
+        Ok(())
     }
 
     // Shutdown client, optionally sending a final message
     fn shutdown_client(&mut self, addr: SocketAddr, text: Option<&str>) {
         log::info!("Shutting down Client {addr}");
-        if let Some(stream) = self
-            .wait_list
-            .remove(&addr)
-            .or_else(|| self.conns.remove(&addr))
-        {
+        if let Some(client) = self.clients.remove(&addr) {
             if let Some(text) = text {
-                let _ = ciborium::into_writer(
-                    &remote::Message::new(remote::Author::Server, text.to_owned()),
-                    stream.as_ref(),
-                );
+                let _ = write_to(client.stream.as_ref(), text.to_owned());
             }
-            let _ = stream.as_ref().shutdown(net::Shutdown::Both);
+            let _ = client.stream.as_ref().shutdown(net::Shutdown::Both);
         }
     }
 
@@ -299,102 +246,53 @@ impl Server {
         );
     }
 
-    /// Attempts to authenticate a client with the token it provided
-    fn authenticate_client(&mut self, addr: SocketAddr, token_str: &str) -> Result<()> {
-        log::debug!("Attempting validation from Client {addr} with token: {token_str}");
-        if Token::from_str(token_str)? == self.access_token {
-            log::info!("Client {addr} successfully authenticated");
-            let client = self
-                .clients
-                .get_mut(&addr)
-                .ok_or(anyhow!("Unable to find Client {addr} information"))?;
-            client.auth_timestamp = Some(Utc::now());
-            let stream = self
-                .wait_list
-                .remove(&addr)
-                .ok_or(anyhow!("Client {addr} not found in wait list"))?;
-            ciborium::into_writer(
-                &remote::Message::new(
-                    remote::Author::Server,
-                    format!(
-                        "Welcome to the chat server! You are user {id}.\n",
-                        id = client.id
-                    ),
-                ),
-                stream.as_ref(),
-            )
-            .context("Unable to send welcome message to Client {addr}")?;
-            stream.as_ref().flush()?;
-            let _ = self.conns.insert(addr, stream);
-            Ok(())
-        } else {
-            bail!("Invalid token")
-        }
-    }
 
     /// Run server
     pub fn run(mut self) -> Result<()> {
         log::trace!("Launching chat server");
 
+        // Main server loop
         loop {
-            // Try to receive a message
-            let message = match self.receiver.recv() {
+            // Try to receive a request from a client thread
+            let request = match self.receiver.recv() {
                 Err(err) => {
                     log::error!("Server could not receive message: {err}");
                     continue;
                 }
-                Ok(message) => message,
+                Ok(request) => request,
             };
-            log::debug!("Server received message: {message}");
+            log::debug!("Server received message: {request}");
 
             // Ban filter
-            if self.ban_filter(&message) {
+            if self.ban_filter(&request) {
                 continue;
             }
 
-            let client_addr = message.addr;
+            // Address of the client that made the request
+            let addr = request.addr;
 
-            // Get reference to client info
-            let client = {
-                let clients_count = self.clients.len();
-                insert_or_get_mut(
-                    &mut self.clients,
-                    client_addr,
-                    ClientInfo::new(clients_count + 1),
-                )
-            };
-
-            // Handle message
-            match message.request {
-                ClientRequest::ConnectRequest(stream) => {
-                    if let Err(err) = self.connect_client(client_addr, stream.clone()) {
-                        log::error!("Unable to connect Client {client_addr}: {err}");
+            // Handle client request
+            match request.request {
+                Request::Connect(stream) => {
+                    if let Err(err) = self.connect_client(addr, stream.clone()) {
+                        log::error!("Unable to connect Client {addr}: {err}");
                         let _ = stream.shutdown(net::Shutdown::Both);
                     }
                 }
 
-                ClientRequest::DisconnetRequest => {
-                    if let Err(err) = self.disconnect_client(client_addr) {
-                        log::error!("Unable to disconnect Client {client_addr}: {err}");
+                Request::Disconnet => {
+                    if let Err(err) = self.disconnect_client(addr) {
+                        log::error!("Unable to disconnect Client {addr}: {err}");
                     }
                 }
 
-                ClientRequest::BanRequest(reason) => {
-                    self.ban_client(client_addr, reason);
+                Request::Ban(reason) => {
+                    self.ban_client(addr, reason);
                 }
 
-                ClientRequest::Broadcast(text) => {
-                    // Token challenge for unauthenticated clients
-                    if client.auth_timestamp.is_none() {
-                        if let Err(err) = self.authenticate_client(client_addr, &text) {
-                            log::error!("Unable to authenticate Client {client_addr}: {err}");
-                            self.shutdown_client(client_addr, Some("Invalid token!\n"));
-                        }
-                        continue;
-                    }
-
-                    log::info!("Client {client_addr} says: {text}");
-                    if let Err(err) = self.broadcast(client_addr, &text) {
+                Request::Broadcast(text) => {
+                    log::info!("Client {addr} says: {text}");
+                    if let Err(err) = self.broadcast(addr, &text) {
                         log::error!("Unable to broadcast message: {err}");
                     }
                 }

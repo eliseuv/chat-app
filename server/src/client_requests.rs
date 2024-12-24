@@ -4,17 +4,16 @@ use std::{
     sync::Arc,
 };
 
-/// Local Messages
 /// Messages sent locally from client thread to server
 #[derive(Debug)]
-pub struct LocalMessage {
-    /// Address of the client sending the message
+pub struct ClientRequest {
+    /// Address of the client sending the request
     pub(crate) addr: SocketAddr,
-    /// Content of the message
-    pub(crate) request: ClientRequest,
+    /// The request itself
+    pub(crate) request: Request,
 }
 
-impl Display for LocalMessage {
+impl Display for ClientRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -27,29 +26,29 @@ impl Display for LocalMessage {
 
 /// Request from client thread to server
 #[derive(Debug)]
-pub(crate) enum ClientRequest {
-    ConnectRequest(Arc<TcpStream>),
-    DisconnetRequest,
-    BanRequest(BanReason),
+pub(crate) enum Request {
+    Connect(Arc<TcpStream>),
+    Disconnet,
+    Ban(BanReason),
     Broadcast(String),
 }
 
-impl Display for ClientRequest {
+impl Display for Request {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
             "{}",
             match self {
-                ClientRequest::ConnectRequest(_) => "Connect Request".to_owned(),
-                ClientRequest::DisconnetRequest => "Disconnect Request".to_owned(),
-                ClientRequest::BanRequest(reason) => {
+                Request::Connect(_) => "Connect Request".to_owned(),
+                Request::Disconnet => "Disconnect Request".to_owned(),
+                Request::Ban(reason) => {
                     "Ban Me for ".to_owned()
                         + match reason {
                             BanReason::Spamming => "Spamming",
                             BanReason::_Other(reason) => reason,
                         }
                 }
-                ClientRequest::Broadcast(text) => {
+                Request::Broadcast(text) => {
                     format!("Broadcast: {text}")
                 }
             }

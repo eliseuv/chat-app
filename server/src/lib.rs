@@ -5,7 +5,7 @@ pub mod server;
 pub mod client;
 
 /// Messages sent locally from client to server threads
-pub mod local;
+pub mod client_requests;
 
 /// Messages exchange remotely between remote client and local client thread
 pub mod remote;

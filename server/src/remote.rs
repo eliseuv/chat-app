@@ -1,7 +1,11 @@
-use std::fmt::Display;
+use std::{fmt::Display, io::Write};
 
+use anyhow::{Context, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+
+/// Size in bytes of the buffer to store serialized data
+pub const BUFFER_SIZE: usize = 64 * 1024; // 64kb
 
 /// Message to be sent to remote client
 #[derive(Debug, Serialize, Deserialize)]
@@ -18,6 +22,13 @@ impl Message {
             author,
             text,
         }
+    }
+
+    pub fn write_to<W>(&self, writer: W) -> Result<()>
+    where
+        W: Write,
+    {
+        ciborium::into_writer(self, writer).context("Unable to serialize message")
     }
 }
 
