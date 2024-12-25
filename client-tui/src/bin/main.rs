@@ -1,13 +1,13 @@
 use core::str;
 use std::{
-    env,
     io::{self, Write},
-    net::TcpStream,
+    net::{SocketAddr, TcpStream},
     thread, time,
 };
 
 use anyhow::{bail, Context, Result};
 use chrono::TimeZone;
+use clap::Parser;
 use crossterm::{
     cursor::{self, MoveTo},
     event::{self, Event, KeyCode, KeyModifiers},
@@ -16,7 +16,8 @@ use crossterm::{
     tty::IsTty,
     QueueableCommand,
 };
-use server::remote;
+
+use server::messages::{self, MessageToClient};
 
 // TODO: Read message struct directly from stream, without buffer
 // TODO: Separate read message from stream and process it
@@ -24,6 +25,14 @@ use server::remote;
 // TODO: Better authentication step
 // TODO: UI: Wrap lines
 // TODO: UI: Persistent prompt content on resize
+
+#[derive(Debug, Parser)]
+#[command(version, about, long_about=None)]
+struct Args {
+    /// Address of the server
+    #[arg(short, long)]
+    addr: SocketAddr,
+}
 
 #[derive(Debug)]
 struct Rect {
@@ -110,7 +119,6 @@ where
     height: u16,
     prompt: Prompt,
     chat: Vec<String>,
-    buffer: [u8; remote::BUFFER_SIZE],
     stream: TcpStream,
     state: State,
 }
@@ -131,7 +139,6 @@ where
             height,
             prompt: Prompt::new(width),
             chat: Vec::new(),
-            buffer: [0; remote::BUFFER_SIZE],
             stream,
             state: State::Default,
         })
@@ -230,7 +237,7 @@ where
                 KeyCode::Enter => {
                     if !self.prompt.is_empty() {
                         match self.stream.write(self.prompt.text().as_bytes()) {
-                            Err(err) => log::error!("Unable to send data: {err}"),
+                            Err(e) => log::error!("Unable to send data: {e}"),
                             Ok(n) => log::info!("Successfully sent {n} bytes"),
                         }
                         let msg = format!(
@@ -250,26 +257,44 @@ where
     }
 
     fn read_stream(&mut self) -> Result<()> {
-        let remote_message: remote::Message =
-            ciborium::from_reader_with_buffer(&self.stream, &mut self.buffer)
-                .context("Unable to read message from stream")?;
+        let message = match MessageToClient::read_from(&self.stream) {
+            Err(e) => {
+                // Ignore `WouldBlock` errors
+                if let ciborium::de::Error::Io(err) = e {
+                    if err.kind() == io::ErrorKind::WouldBlock {
+                        return Ok(());
+                    } else {
+                        return Err(err).context("Unable to read from stream due to IO error");
+                    }
+                } else {
+                    return Err(e).context("Unable to read from stream due to parsing error");
+                }
+            }
+            Ok(msg) => msg,
+        };
         let dt = chrono::Local
-            .timestamp_opt(remote_message.timestamp, 0)
+            .timestamp_opt(message.timestamp, 0)
             .single()
             .context("Unable to convert timestamp to local timezone")?;
-        let message = match remote_message.author {
-            remote::Author::Server => format!(
-                "[{time}] {text}",
-                time = dt.format("%d/%m/%Y %H:%M:%S"),
-                text = remote_message.text
-            ),
-            remote::Author::Client(id) => format!(
-                "[{time}] User {id}: {text}",
-                time = dt.format("%d/%m/%Y %H:%M:%S"),
-                text = remote_message.text
-            ),
+        let mut message_txt = format!("[{}]", dt.format("%d/%m/%Y %H:%M:%S"));
+        match message.author {
+            messages::MessageAuthor::Server(content) => {
+                message_txt.push_str(" Server: ");
+                match content {
+                    messages::ServerMessage::Ban(reason) => {
+                        message_txt.push_str(&format!("You have been banned. Reason: {reason}"))
+                    }
+                    messages::ServerMessage::Text(text) => message_txt.push_str(&text),
+                }
+            }
+            messages::MessageAuthor::Peer { id, content } => {
+                message_txt.push_str(&format!(" User {id}: "));
+                match content {
+                    messages::PeerMessage::Text(text) => message_txt.push_str(&text),
+                }
+            }
         };
-        self.chat.push(message);
+        self.chat.push(message_txt);
         Ok(())
     }
 
@@ -288,13 +313,13 @@ where
                 State::Default => {
                     // Poll for new event
                     while event::poll(time::Duration::ZERO)? {
-                        if let Err(err) = self.handle_event() {
-                            log::error!("Error handling event: {err}");
+                        if let Err(e) = self.handle_event() {
+                            log::error!("Error handling event: {e}");
                         }
                     }
 
-                    if let Err(err) = self.read_stream() {
-                        log::error!("Error reading from stream: {err}");
+                    if let Err(e) = self.read_stream() {
+                        log::error!("Error reading from stream: {e}");
                     }
 
                     self.draw_main()?;
@@ -308,20 +333,20 @@ where
 }
 
 fn main() -> Result<()> {
-    log4rs::init_file("client-logger.yml", Default::default())
+    // Initialize logger
+    log4rs::init_file("client-tui/log4rs.yml", Default::default())
         .context("Unable to initialize logger")?;
 
-    let mut args = env::args();
-    let _program = args.next().expect("program name");
-    let addr = args.next().expect("server address");
+    // Parse arguments
+    let args = Args::parse();
 
-    let stream = TcpStream::connect(format!("{addr}:6969"))?;
+    let stream = TcpStream::connect(args.addr)?;
     stream.set_nonblocking(true)?;
 
-    if let Err(err) = ClientInterface::new(io::stdout(), stream)?.run() {
+    if let Err(e) = ClientInterface::new(io::stdout(), stream)?.run() {
         terminal::disable_raw_mode()?;
-        log::error!("{err}");
-        return Err(err);
+        log::error!("{e}");
+        return Err(e);
     }
 
     Ok(())

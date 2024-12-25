@@ -11,14 +11,17 @@ use chrono::{DateTime, TimeDelta, Utc};
 use log::debug;
 
 use crate::{
-    client_requests::{BanReason, ClientRequest, Request},
-    remote::{self, BUFFER_SIZE},
+    messages::{MessageAuthor, MessageToClient, ServerMessage},
+    requests::{BanReason, ClientRequest, Request},
     server::Token,
 };
 
 // TODO: Receive message struct from remote client
 // TODO: Let client know when server is offline
+// TODO: Is there a way to send message from server thread to client thread?
+// TODO: Send confirmations to client
 
+const BUFFER_SIZE: usize = 64 * 1024; // 64kb
 const MESSAGE_COOLDOWN_TIME: TimeDelta = TimeDelta::milliseconds(300);
 const MAX_STRIKE_COUNT: u32 = 5;
 
@@ -76,15 +79,25 @@ impl Client {
         self.addr
     }
 
+    /// Send message to remote client
+    fn message_client(&self, message: ServerMessage) -> Result<()> {
+        MessageToClient::new(MessageAuthor::Server(message))
+            .write_to(self.stream.as_ref())
+            .context("Unable to send message to {self}")
+    }
+
     /// Authenticate client using the server access token
     pub fn authenticate(&mut self, access_token: Token) -> Result<()> {
-        remote::Message::new(remote::Author::Server, "Provide access token.".to_owned())
-            .write_to(self.stream.as_ref())
+        self.message_client(ServerMessage::Text("Provide access token.".to_owned()))
             .context("Unable to send token challenge")?;
         let bytes = self.read_stream()?;
         let token_str = parse_text(bytes)?;
         if Token::from_str(&token_str)? == access_token {
             log::info!("{self} successfully authenticated");
+            self.message_client(ServerMessage::Text(
+                "Welcome to the chat server!".to_owned(),
+            ))
+            .context("Unable to send welcome message")?;
             Ok(())
         } else {
             bail!("Invalid token")
@@ -156,8 +169,8 @@ impl Client {
             .context("{self} unable to send Disconnect Request to Server")
     }
 
-    /// Send Disconnect Request to Server
-    fn send_text(&self, text: String) -> Result<()> {
+    /// Send Text Message to the Server
+    fn broadcast_text(&self, text: String) -> Result<()> {
         log::trace!("{self} sending Text: {text}");
         self.send_request(Request::Broadcast(text))
             .context("{self} unable to send text message to Server")
@@ -168,7 +181,11 @@ impl Client {
         log::trace!("Spawned thread for {self}");
 
         // Authenticate client using server access token
-        self.authenticate(access_token)?;
+        if let Err(e) = self.authenticate(access_token) {
+            self.message_client(ServerMessage::Text("Failed to authenticate!".to_owned()))?;
+            log::error!("{self} failed to authenticate: {e}");
+            return Err(e);
+        }
 
         // Send connection request to server
         self.request_connect()?;
@@ -189,13 +206,13 @@ impl Client {
             } else {
                 // Handle data read from stream
                 match parse_text(bytes) {
-                    Err(err) => {
-                        log::error!("{self} could not parse text: {err}");
+                    Err(e) => {
+                        log::error!("{self} could not parse text: {e}");
                     }
                     Ok(text) => {
                         log::debug!("{self} says: {text}");
-                        if let Err(err) = self.send_text(text) {
-                            log::error!("{self} could not send text Message to server: {err}");
+                        if let Err(e) = self.broadcast_text(text) {
+                            log::error!("{self} could not send text Message to server: {e}");
                         };
                     }
                 }

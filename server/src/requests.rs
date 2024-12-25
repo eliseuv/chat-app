@@ -4,6 +4,8 @@ use std::{
     sync::Arc,
 };
 
+use serde::{Deserialize, Serialize};
+
 /// Messages sent locally from client thread to server
 #[derive(Debug)]
 pub struct ClientRequest {
@@ -57,8 +59,8 @@ impl Display for Request {
 }
 
 /// Reason for client to be banned from the server
-#[derive(Debug)]
-pub(crate) enum BanReason {
+#[derive(Debug, Serialize, Deserialize)]
+pub enum BanReason {
     Spamming,
     _Other(String),
 }

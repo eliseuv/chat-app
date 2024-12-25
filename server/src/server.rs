@@ -1,22 +1,16 @@
 use core::str;
 use std::{
-    collections::HashMap,
-    fmt::Display,
-    net::{self, IpAddr, SocketAddr, TcpStream},
-    sync::{mpsc::Receiver, Arc},
+    collections::HashMap, fmt::Display, net::{self, IpAddr, SocketAddr, TcpStream}, sync::{mpsc::Receiver, Arc}
 };
 
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, TimeDelta, Utc};
 use getrandom::getrandom;
 
-use crate::{
-    client_requests::{BanReason, ClientRequest, Request},
-    remote::{Author, Message},
-};
+use crate::{messages::{MessageAuthor, MessageToClient, PeerMessage, ServerMessage}, requests::{BanReason, ClientRequest, Request}};
+
 
 // TODO: Authentication
-// TODO: Move more load to the client thread
 // TODO: Fix vulnerability to `slow loris reader`
 
 /// Total a client remains banned
@@ -33,7 +27,7 @@ impl Token {
     /// Generate new random access token
     fn generate() -> Result<Token> {
         let mut buffer = [0; TOKEN_LENGTH];
-        getrandom(&mut buffer).map_err(|err| anyhow!("Unable to generate random token: {err}"))?;
+        getrandom(&mut buffer).map_err(|e| anyhow!("Unable to generate random token: {e}"))?;
         Ok(Token(buffer))
     }
 
@@ -66,10 +60,9 @@ impl Display for Token {
     }
 }
 
-fn write_to(stream: &TcpStream, text: String) -> Result<()> {
-    Message::new(Author::Server, text)
-        .write_to(stream)
-        .context("Unable to write message to client stream")
+/// Send server message to client stream
+fn message_client(message: ServerMessage, stream: &TcpStream) -> Result<()> {
+    MessageToClient::new(MessageAuthor::Server(message)).write_to(stream).context("Unable to send message")
 }
 
 #[derive(Debug)]
@@ -123,21 +116,15 @@ impl Server {
                 );
                 // Disconnect banned client if currently connected
                 if let Some(client) = self.clients.remove(&addr) {
-                    let _ = write_to(
-                        client.stream.as_ref(),
-                        format!(
+                    let _ =  message_client(ServerMessage::Text(format!(
                             "You are currently banned\nRemaining time: {remaining_secs} seconds\n"
-                        ),
-                    );
+                        )) , client.stream.as_ref());
                 } else {
                     // Refuse Connect Request
                     if let Request::Connect(stream) = &request.request {
-                        let _ = write_to(
-                            stream.as_ref(),
-                            format!(
+                    let _ =  message_client(ServerMessage::Text(format!(
                             "You are currently banned\nRemaining time: {remaining_secs} seconds\n"
-                        ),
-                        );
+                        )) , stream.as_ref());
                         let _ = (*stream).as_ref().shutdown(net::Shutdown::Both);
                     }
                 }
@@ -185,31 +172,22 @@ impl Server {
         }
     }
 
-    fn get_client_id(&self, addr: SocketAddr) -> Result<usize> {
-        let id = self
-            .clients
-            .get(&addr)
-            .ok_or(anyhow!("Client {addr} id not found"))?
-            .id;
-        Ok(id)
-    }
-
-    fn send_to_client(&self, client: &Client, message: &Message) ->Result<()> {
-        ciborium::into_writer(message, client.stream.as_ref()).context("Unable to send message")
-    }
 
     fn broadcast(&self, author_addr: SocketAddr, text: &str) -> Result<()> {
         log::trace!("Broadcasting message from client {author_addr}");
-        let id = self.get_client_id(author_addr)?;
-        let author = Author::Client(id);
-        let message = Message::new(author, text.to_owned());
+        let id = self
+            .clients
+            .get(&author_addr)
+            .ok_or(anyhow!("Client {author_addr} id not found"))?
+            .id;
+        let message =  MessageToClient::new(MessageAuthor::Peer { id, content: PeerMessage::Text(text.to_owned()) });
         log::debug!("Message: {message:?}");
         self.clients.iter().filter(|(peer_addr, _)| **peer_addr != author_addr ).for_each(|(peer_addr, peer_client)| 
             {
                 log::debug!("Sending message from Client {author_addr} to Client {peer_addr}");
-                if let Err(err) = self.send_to_client(peer_client, &message) {
+                if let Err(e) = message.write_to(peer_client.stream.as_ref()) {
                     log::error!(
-                        "Unable to broadcast message from Client {author_addr} to Client {peer_addr}: {err}"
+                        "Unable to broadcast message from Client {author_addr} to Client {peer_addr}: {e}"
                     );
                 }
 
@@ -222,7 +200,7 @@ impl Server {
         log::info!("Shutting down Client {addr}");
         if let Some(client) = self.clients.remove(&addr) {
             if let Some(text) = text {
-                let _ = write_to(client.stream.as_ref(), text.to_owned());
+                let _ = message_client(ServerMessage::Text(text.to_owned()), client.stream.as_ref());
             }
             let _ = client.stream.as_ref().shutdown(net::Shutdown::Both);
         }
@@ -255,8 +233,8 @@ impl Server {
         loop {
             // Try to receive a request from a client thread
             let request = match self.receiver.recv() {
-                Err(err) => {
-                    log::error!("Server could not receive message: {err}");
+                Err(e) => {
+                    log::error!("Server could not receive message: {e}");
                     continue;
                 }
                 Ok(request) => request,
@@ -274,15 +252,15 @@ impl Server {
             // Handle client request
             match request.request {
                 Request::Connect(stream) => {
-                    if let Err(err) = self.connect_client(addr, stream.clone()) {
-                        log::error!("Unable to connect Client {addr}: {err}");
+                    if let Err(e) = self.connect_client(addr, stream.clone()) {
+                        log::error!("Unable to connect Client {addr}: {e}");
                         let _ = stream.shutdown(net::Shutdown::Both);
                     }
                 }
 
                 Request::Disconnet => {
-                    if let Err(err) = self.disconnect_client(addr) {
-                        log::error!("Unable to disconnect Client {addr}: {err}");
+                    if let Err(e) = self.disconnect_client(addr) {
+                        log::error!("Unable to disconnect Client {addr}: {e}");
                     }
                 }
 
@@ -292,8 +270,8 @@ impl Server {
 
                 Request::Broadcast(text) => {
                     log::info!("Client {addr} says: {text}");
-                    if let Err(err) = self.broadcast(addr, &text) {
-                        log::error!("Unable to broadcast message: {err}");
+                    if let Err(e) = self.broadcast(addr, &text) {
+                        log::error!("Unable to broadcast message: {e}");
                     }
                 }
             }

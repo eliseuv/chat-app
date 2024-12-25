@@ -19,5 +19,8 @@ chrono = { workspace = true }
 serde = { workspace = true }
 ciborium = { workspace = true }
 
+# Async
+tokio = { workspace = true }
+
 # Security
 getrandom = "0.2.15"

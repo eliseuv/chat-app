@@ -1,5 +1,5 @@
 [package]
-name = "client"
+name = "client-tui"
 authors.workspace = true
 version = "0.1.0"
 edition = "2021"
@@ -24,4 +24,5 @@ serde = { workspace = true }
 ciborium = { workspace = true }
 
 # TUI
+clap = { version = "4.5.23", features = ["derive"] }
 crossterm = "0.28.1"

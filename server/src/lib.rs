@@ -4,11 +4,11 @@ pub mod server;
 /// Client thread
 pub mod client;
 
-/// Messages sent locally from client to server threads
-pub mod client_requests;
+/// Locally sent requests from client threads to server thread
+pub mod requests;
 
 /// Messages exchange remotely between remote client and local client thread
-pub mod remote;
+pub mod messages;
 
 /// Utilities
 pub mod utils;

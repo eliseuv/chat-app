@@ -1,15 +1,14 @@
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener},
-    sync::mpsc::channel,
+    sync::mpsc,
     thread,
 };
 
 use anyhow::{Context, Result};
 
-use server::{client::Client, client_requests::ClientRequest, server::Server};
+use server::{client::Client, requests::ClientRequest, server::Server};
 
 // TODO: Better async. Look `tokio` lib
-// TODO: Use `anyhow` lib to better compose errors
 
 const PORT: u16 = 6969;
 
@@ -23,14 +22,14 @@ fn main() -> Result<()> {
 
     // Bind TCP listener to address
     let server_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), PORT);
-    let tcp_listener = TcpListener::bind(server_addr)?;
+    let tcp_listener = TcpListener::bind(server_addr).context("Unable to bind TCP listener")?;
     log::info!("Listening to address {server_addr}");
 
-    // Create main messages channel
-    let (message_sender, message_receiver) = channel::<ClientRequest>();
+    // Requests channel
+    let (request_sender, request_receiver) = mpsc::channel::<ClientRequest>();
 
     // Launch server
-    let server = Server::new(message_receiver).expect("Unable to create new Server");
+    let server = Server::new(request_receiver).context("Unable to create new Server")?;
     let access_token = server.access_token();
     let _server_handle = thread::spawn(move || server.run());
 
@@ -38,15 +37,15 @@ fn main() -> Result<()> {
     for incoming_stream in tcp_listener.incoming() {
         // Handle TCP connections
         match incoming_stream {
-            Err(err) => log::error!("Could not handle incoming TCP connection: {err}"),
+            Err(e) => log::error!("Could not handle incoming TCP connection: {e}"),
             Ok(stream) => {
                 // Spawn client thread
-                match Client::new(stream, message_sender.clone()) {
-                    Err(err) => log::error!("Unable to create new Client: {err}"),
+                match Client::new(stream, request_sender.clone()) {
+                    Err(e) => log::error!("Unable to create new Client: {e}"),
                     Ok(mut client) => {
                         let _ = thread::spawn(move || {
-                            if let Err(err) = client.run(access_token) {
-                                log::error!("Error in {client} thread: {err}",);
+                            if let Err(e) = client.run(access_token) {
+                                log::error!("Error in {client} thread: {e}",);
                                 let _ = client.shutdown();
                             }
                         });

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["server", "client"]
+members = ["server", "client-tui"]
 
 [workspace.package]
 description = "Server and Client for a simple text chat application"
@@ -16,6 +16,9 @@ anyhow = "1.0.94"
 
 # Time
 chrono = "0.4.39"
+
+# Async
+tokio = { version = "1.42.0", features = ["full"] }
 
 # Serialization
 serde = { version = "1.0.216", features = ["derive"] }
