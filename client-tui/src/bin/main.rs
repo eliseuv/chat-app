@@ -6,7 +6,7 @@ use std::{
 };
 
 use anyhow::{bail, Context, Result};
-use chrono::TimeZone;
+use chrono::{DateTime, TimeZone};
 use clap::Parser;
 use crossterm::{
     cursor::{self, MoveTo},
@@ -17,7 +17,7 @@ use crossterm::{
     QueueableCommand,
 };
 
-use server::messages::{self, MessageToClient};
+use server::messages::{self, MessageToClient, PeerMessage};
 
 // TODO: Read message struct directly from stream, without buffer
 // TODO: Separate read message from stream and process it
@@ -26,12 +26,12 @@ use server::messages::{self, MessageToClient};
 // TODO: UI: Wrap lines
 // TODO: UI: Persistent prompt content on resize
 
-#[derive(Debug, Parser)]
-#[command(version, about, long_about=None)]
-struct Args {
-    /// Address of the server
-    #[arg(short, long)]
-    addr: SocketAddr,
+/// Get local datetime from message timestamp
+fn datetime(timestamp: i64) -> Result<DateTime<chrono::Local>> {
+    chrono::Local
+        .timestamp_opt(timestamp, 0)
+        .single()
+        .context("Unable to convert timestamp to local timezone")
 }
 
 #[derive(Debug)]
@@ -102,7 +102,49 @@ impl Prompt {
     }
 }
 
-// Application state
+/// Messages stored in the client
+#[derive(Debug)]
+enum Message {
+    /// Message received
+    Received(MessageToClient),
+    /// Message sent from this client
+    Sent {
+        timestamp: i64,
+        content: PeerMessage,
+    },
+}
+
+impl Message {
+    fn string(&self) -> Result<String> {
+        match self {
+            Message::Received(message) => match message.author {
+                messages::MessageAuthor::Server(ref content) => match content {
+                    messages::ServerMessage::Ban(reason) => {
+                        Ok(format!("You have been banned. Reason: {reason}"))
+                    }
+                    messages::ServerMessage::Text(text) => Ok(format!(
+                        "[{dt}] Server: {text}",
+                        dt = datetime(message.timestamp)?.format("%d/%m/%Y %H:%M:%S")
+                    )),
+                },
+                messages::MessageAuthor::Peer { id, ref content } => match content {
+                    messages::PeerMessage::Text(text) => Ok(format!(
+                        "[{dt}] User {id}: {text}",
+                        dt = datetime(message.timestamp)?.format("%d/%m/%Y %H:%M:%S")
+                    )),
+                },
+            },
+            Message::Sent { timestamp, content } => match content {
+                PeerMessage::Text(text) => Ok(format!(
+                    "[{dt}] You: {text}",
+                    dt = datetime(*timestamp)?.format("%d/%m/%Y %H:%M:%S")
+                )),
+            },
+        }
+    }
+}
+
+/// Application state
 #[derive(Debug, PartialEq, Eq)]
 enum State {
     Default,
@@ -118,7 +160,7 @@ where
     width: u16,
     height: u16,
     prompt: Prompt,
-    chat: Vec<String>,
+    chat: Vec<Message>,
     stream: TcpStream,
     state: State,
 }
@@ -184,10 +226,11 @@ where
         self.chat
             .iter()
             .skip(self.chat.len().saturating_sub(rect.h as usize))
+            .filter_map(|message| message.string().ok())
             .enumerate()
             .try_fold(self.output.queue(cursor::Show)?, |cmd, (row, line)| {
                 cmd.queue(MoveTo(rect.x, rect.y + row as u16))?
-                    .queue(Print(line.get(0..rect.w as usize).unwrap_or(line)))
+                    .queue(Print(line.get(0..rect.w as usize).unwrap_or(&line)))
             })
             .map(|_| ())
             .context("Unable to print chat")
@@ -240,12 +283,10 @@ where
                             Err(e) => log::error!("Unable to send data: {e}"),
                             Ok(n) => log::info!("Successfully sent {n} bytes"),
                         }
-                        let msg = format!(
-                            "[{dt}] You: {text}",
-                            dt = chrono::Local::now().format("%d/%m/%Y %H:%M:%S"),
-                            text = self.prompt.text()
-                        );
-                        self.chat.push(msg);
+                        self.chat.push(Message::Sent {
+                            timestamp: chrono::Local::now().timestamp(),
+                            content: PeerMessage::Text(self.prompt.text().to_string()),
+                        });
                         self.prompt.clear();
                     }
                 }
@@ -256,46 +297,26 @@ where
         Ok(())
     }
 
+    /// Read incoming data from stream
     fn read_stream(&mut self) -> Result<()> {
-        let message = match MessageToClient::read_from(&self.stream) {
+        match MessageToClient::read_from(&self.stream) {
             Err(e) => {
                 // Ignore `WouldBlock` errors
                 if let ciborium::de::Error::Io(err) = e {
                     if err.kind() == io::ErrorKind::WouldBlock {
-                        return Ok(());
+                        Ok(())
                     } else {
-                        return Err(err).context("Unable to read from stream due to IO error");
+                        Err(err).context("Unable to read from stream due to IO error")
                     }
                 } else {
-                    return Err(e).context("Unable to read from stream due to parsing error");
+                    Err(e).context("Unable to read from stream due to parsing error")
                 }
             }
-            Ok(msg) => msg,
-        };
-        let dt = chrono::Local
-            .timestamp_opt(message.timestamp, 0)
-            .single()
-            .context("Unable to convert timestamp to local timezone")?;
-        let mut message_txt = format!("[{}]", dt.format("%d/%m/%Y %H:%M:%S"));
-        match message.author {
-            messages::MessageAuthor::Server(content) => {
-                message_txt.push_str(" Server: ");
-                match content {
-                    messages::ServerMessage::Ban(reason) => {
-                        message_txt.push_str(&format!("You have been banned. Reason: {reason}"))
-                    }
-                    messages::ServerMessage::Text(text) => message_txt.push_str(&text),
-                }
+            Ok(message) => {
+                self.chat.push(Message::Received(message));
+                Ok(())
             }
-            messages::MessageAuthor::Peer { id, content } => {
-                message_txt.push_str(&format!(" User {id}: "));
-                match content {
-                    messages::PeerMessage::Text(text) => message_txt.push_str(&text),
-                }
-            }
-        };
-        self.chat.push(message_txt);
-        Ok(())
+        }
     }
 
     fn run(&mut self) -> Result<()> {
@@ -320,7 +341,8 @@ where
 
                     if let Err(e) = self.read_stream() {
                         log::error!("Error reading from stream: {e}");
-                    }
+                        continue;
+                    };
 
                     self.draw_main()?;
 
@@ -330,6 +352,15 @@ where
             }
         }
     }
+}
+
+/// Command line arguments
+#[derive(Debug, Parser)]
+#[command(version, about, long_about=None)]
+struct Args {
+    /// Address of the server
+    #[arg(short, long)]
+    addr: SocketAddr,
 }
 
 fn main() -> Result<()> {
